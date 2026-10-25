@@ -1,0 +1,66 @@
+name: Core and native checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: python -m unittest discover -s tests -v
+      - run: bash server/windows/scripts/test-portable.sh
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - run: bash client/android/scripts/test-core.sh
+      - run: bash client/android/scripts/build-sdk.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reflection-android-debug
+          path: client/android/build/sdk/reflection-debug.apk
+          retention-days: 14
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build --package-path server/macos -c release
+      - run: swift run --package-path server/macos reflection-core-checks
+      - run: swift test --package-path server/macos
+      - name: Test native host protocol without injecting system input
+        run: |
+          native_dir="$(swift build --package-path server/macos -c release --show-bin-path)"
+          python3 tools/check_host.py --server "$native_dir/reflection"
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: cmake -S server/windows -B server/windows/build -A x64
+      - run: cmake --build server/windows/build --config Release
+      - run: ctest --test-dir server/windows/build -C Release --output-on-failure
+      - run: python tools/check_host.py --server server/windows/build/Release/reflection-host.exe --platform windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reflection-windows-x64
+          path: server/windows/build/Release/reflection-host.exe
+          retention-days: 14

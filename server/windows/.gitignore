@@ -1,0 +1,9 @@
+/build/
+/.tools/
+/.cache/
+*.exe
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.lib

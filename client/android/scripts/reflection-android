@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""ADB control surface for Reflection; tokens are never printed by this helper."""
+import argparse
+import pathlib
+import re
+import subprocess
+import sys
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--serial', help='ADB device serial when several devices are attached')
+sub = parser.add_subparsers(dest='command', required=True)
+install = sub.add_parser('install')
+install.add_argument('--apk', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1] / 'build/sdk/reflection-debug.apk')
+sub.add_parser('open')
+for command in ('connect', 'disconnect', 'status', 'devices', 'paired', 'clear', 'selftest', 'grant-bluetooth'):
+    sub.add_parser(command)
+configure = sub.add_parser('configure')
+configure.add_argument('--host')
+configure.add_argument('--port', type=int)
+configure.add_argument('--token-file', type=pathlib.Path, help='File containing the 64-character host pairing token')
+configure.add_argument('--mode', choices=['tcp', 'bluetooth'])
+configure.add_argument('--bluetooth', help='Address of the paired host, e.g. AA:BB:CC:DD:EE:FF')
+preview = sub.add_parser('preview')
+preview.add_argument('state', choices=['on', 'off'])
+stabilization = sub.add_parser('stabilization', help='Configure adaptive pen stabilization')
+stabilization.add_argument('state', choices=['on', 'off', 'status'], nargs='?', default='status')
+calibration = sub.add_parser('calibration', help='Manage the stationary pen noise calibration')
+calibration.add_argument('action', choices=['start', 'finish', 'cancel', 'reset'])
+args = parser.parse_args()
+adb = ['adb'] + (['-s', args.serial] if args.serial else [])
+package = 'io.github.linloir.reflection'
+if args.command == 'install':
+    command = adb + ['install', '-r', str(args.apk)]
+elif args.command == 'open':
+    command = adb + ['shell', 'am', 'start', '-n', package + '/.ui.MainActivity']
+elif args.command == 'grant-bluetooth':
+    command = adb + ['shell', 'pm', 'grant', package, 'android.permission.BLUETOOTH_CONNECT']
+else:
+    action = 'calibration-' + args.action if args.command == 'calibration' else args.command
+    command = adb + ['shell', 'am', 'broadcast', '-n', package + '/.control.ControlReceiver', '--es', 'command', action]
+    if args.command == 'configure':
+        for key in ('host', 'mode', 'bluetooth'):
+            value = getattr(args, key)
+            if value is not None:
+                if not re.fullmatch(r'[a-zA-Z0-9.:%_\-\[\]]+', value):
+                    parser.error('Invalid characters in ' + key)
+                command += ['--es', key, value.upper() if key == 'bluetooth' else value]
+        if args.port is not None:
+            if not 1 <= args.port <= 65535:
+                parser.error('Port must be 1..65535')
+            command += ['--ei', 'port', str(args.port)]
+        if args.token_file:
+            token = args.token_file.read_text().strip()
+            if not re.fullmatch(r'[0-9a-fA-F]{64}', token):
+                parser.error('Token file must contain exactly 64 hexadecimal characters')
+            command += ['--es', 'token', token]
+    elif args.command == 'preview':
+        command += ['--ez', 'enabled', str(args.state == 'on').lower()]
+    elif args.command == 'stabilization' and args.state != 'status':
+        command += ['--ez', 'enabled', str(args.state == 'on').lower()]
+result = subprocess.run(command, capture_output=True, text=True)
+# `am broadcast` echoes extras on some Android releases: scrub the token defensively.
+output = result.stdout + result.stderr
+if args.command == 'configure' and args.token_file:
+    output = output.replace(token, '[redacted]')
+sys.stdout.write(output)
+if result.returncode or re.search(r'Broadcast completed: result=(?!0\b)-?\d+', output):
+    raise SystemExit(result.returncode or 1)

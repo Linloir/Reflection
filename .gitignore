@@ -1,0 +1,57 @@
+# Local configuration, credentials, recordings, and development notes
+.local/
+.env
+.env.*
+!.env.example
+*.local.json
+*.secret
+*.keystore
+*.jks
+local.properties
+captures/
+
+# Operating systems and editors
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Android / Java
+.gradle/
+**/build/
+*.apk
+*.aab
+*.dex
+*.class
+*.hprof
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Windows / CMake
+out/
+.vs/
+cmake-build-*/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+
+# Python and generated reports
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+*.log
