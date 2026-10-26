@@ -46,6 +46,7 @@ struct HostEvent {
 
 using EventSink = std::function<void(const HostEvent&)>;
 void serve(const Config& config, bool dry_run, std::atomic_bool& running, const EventSink& events,
-           std::shared_ptr<DisplayMapping> mapping = {}, std::shared_ptr<HostInput> input = {});
+           std::shared_ptr<DisplayMapping> mapping = {}, std::shared_ptr<HostInput> input = {},
+           const std::filesystem::path& configuration_path = {});
 
 } // namespace reflection

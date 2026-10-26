@@ -1,4 +1,6 @@
 #include "reflection/windows.hpp"
+#include "reflection/driver.hpp"
+#include "reflection/runtime.hpp"
 #include "reflection/protocol.hpp"
 #include <ws2bth.h>
 #include <chrono>
@@ -148,24 +150,81 @@ private:
     bool registered_ = false;
 };
 
+class ModeBackend final : public InputBackend {
+    Config config_;
+    bool dry_run_;
+    std::filesystem::path path_;
+    EventSink events_;
+    std::unique_ptr<InputBackend> backend_;
+    Clock::time_point checked_{};
+    bool wait_for_down_ = false;
+    std::string failed_;
+    std::unique_ptr<InputBackend> create(const std::string& mode) {
+        if (dry_run_ || mode == "api") return make_pen_backend(dry_run_, config_.show_cursor);
+        return make_driver_backend();
+    }
+public:
+    ModeBackend(const Config& config, bool dry_run, const std::filesystem::path& path, EventSink events)
+        : config_(config), dry_run_(dry_run), path_(path), events_(std::move(events)) {
+        backend_ = create(config_.input_mode);
+        if (events_) events_({"input_mode", config_.input_mode, 0, 0, dry_run_, {}});
+    }
+    void tick() override {
+        const auto now = Clock::now();
+        if (!path_.empty() && now - checked_ >= std::chrono::milliseconds(250)) {
+            checked_ = now;
+            try {
+                auto mode = load_config(path_).input_mode;
+                if (!dry_run_ && mode == "driver" && !driver_status(false).installed) {
+                    ConfigLock lock(path_);
+                    auto current = load_config(path_);
+                    if (current.input_mode == "driver") { current.input_mode = "api"; save_config(current, path_); }
+                    mode = current.input_mode;
+                }
+                if (mode != config_.input_mode) {
+                    auto next = create(mode);
+                    backend_->release();
+                    backend_ = std::move(next);
+                    config_.input_mode = mode;
+                    wait_for_down_ = true;
+                    if (events_) events_({"input_mode", mode, 0, 0, dry_run_, {}});
+                }
+                failed_.clear();
+            } catch (const std::exception& error) {
+                if (failed_ != error.what() && events_) events_({"input_error", error.what(), 0, 0, dry_run_, {}});
+                failed_ = error.what();
+            }
+        }
+        backend_->tick();
+    }
+    void submit(const MappedSample& sample) override {
+        if (wait_for_down_) {
+            if (sample.source.phase == Phase::down || sample.source.phase == Phase::hover)
+                wait_for_down_ = false;
+            else return;
+        }
+        backend_->submit(sample);
+    }
+    void release() noexcept override { backend_->release(); wait_for_down_ = false; }
+};
+
 void session(SOCKET socket, const Config& config, bool dry_run, const std::atomic_bool& running,
-             const EventSink& events, DisplayMapping& mapping, HostInput& input) {
+             const EventSink& events, DisplayMapping& mapping, HostInput& input, InputBackend& backend) {
     const auto session_key = authenticate(socket, unhex(config.token), running);
-    auto backend = make_pen_backend(dry_run, config.show_cursor);
     struct ReleaseOnExit {
         InputBackend* backend;
         DisplayMapping* mapping;
         HostInput* input;
         ~ReleaseOnExit() { backend->release(); mapping->release(); input->end_session(); }
-    } release{backend.get(), &mapping, &input};
+    } release{&backend, &mapping, &input};
     input.begin_session();
     POINT cursor{};
     if (GetCursorPos(&cursor)) mapping.seed(cursor.x, cursor.y);
     SequenceGuard guard;
     ContactGuard contact_guard;
     const auto tick = [&] {
-        if(input.take_release()) { backend->release(); mapping.release(); contact_guard=ContactGuard{}; }
-        backend->tick();
+        if(input.take_release()) { backend.release(); mapping.release(); contact_guard=ContactGuard{}; }
+        backend.tick();
     };
     uint64_t count = 0;
     auto last_status = Clock::now();
@@ -200,7 +259,7 @@ void session(SOCKET socket, const Config& config, bool dry_run, const std::atomi
             const auto& sample=*processed;
             contact_guard.accept(sample);
             const auto mapped = mapping.map(sample);
-            backend->submit(mapped);
+            backend.submit(mapped);
             if (events && Clock::now() - last_status >= std::chrono::milliseconds(500)) {
                 events({"samples", "", count, 0, dry_run, {}});
                 last_status = Clock::now();
@@ -236,13 +295,14 @@ void session(SOCKET socket, const Config& config, bool dry_run, const std::atomi
 } // namespace
 
 void serve(const Config& original, bool dry_run, std::atomic_bool& running, const EventSink& events,
-           std::shared_ptr<DisplayMapping> mapping, std::shared_ptr<HostInput> input) {
+           std::shared_ptr<DisplayMapping> mapping, std::shared_ptr<HostInput> input,
+           const std::filesystem::path& configuration_path) {
     original.validate();
     Config config = original;
     if (!mapping) mapping = std::make_shared<DisplayMapping>(config, displays);
     if (!input) input = std::make_shared<HostInput>(config.stabilization);
     config.mapping.validate();
-    if (!dry_run && !pen_api_available()) throw std::runtime_error("Synthetic Pointer API unavailable");
+    ModeBackend backend(config, dry_run, configuration_path, events);
     Winsock winsock;
     const bool bluetooth = config.transport == "bluetooth";
     Socket listener(socket(bluetooth ? AF_BTH : AF_INET, SOCK_STREAM, bluetooth ? BTHPROTO_RFCOMM : IPPROTO_TCP));
@@ -279,6 +339,7 @@ void serve(const Config& original, bool dry_run, std::atomic_bool& running, cons
     if (events) events({"listening", config.transport, 0,
                         bluetooth ? advertisement->channel() : config.port, dry_run, {}});
     while (running.load()) {
+        backend.tick();
         if (!ready(listener.get(), false, Clock::now() + std::chrono::milliseconds(500), running)) continue;
         Socket client(accept(listener.get(), nullptr, nullptr));
         if (client.get() == INVALID_SOCKET) {
@@ -293,7 +354,7 @@ void serve(const Config& original, bool dry_run, std::atomic_bool& running, cons
                                 reinterpret_cast<const char*>(&enabled), sizeof(enabled)))
                     throw socket_error("TCP_NODELAY");
             }
-            session(client.get(), config, dry_run, running, events, *mapping, *input);
+            session(client.get(), config, dry_run, running, events, *mapping, *input, backend);
         } catch (const std::exception& error) {
             if (events) events({"disconnected", error.what(), 0, 0, dry_run, {}});
         }

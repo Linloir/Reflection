@@ -164,6 +164,7 @@ public struct MappingConfiguration: Codable, Equatable {
 }
 
 public struct ServerConfiguration: Codable {
+    public var inputMode = "api"
     public var version = 1
     public var bind = "127.0.0.1"
     public var port: UInt16 = 24819
@@ -173,10 +174,11 @@ public struct ServerConfiguration: Codable {
 
     public init(token: String) { self.token = token }
 
-    private enum CodingKeys: String, CodingKey { case version, bind, port, token, mapping, stabilization }
+    private enum CodingKeys: String, CodingKey { case version, bind, port, token, mapping, stabilization, inputMode }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         token = try c.decode(String.self, forKey: .token)
+        inputMode = try c.decodeIfPresent(String.self, forKey: .inputMode) ?? "api"
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? version
         bind = try c.decodeIfPresent(String.self, forKey: .bind) ?? bind
         port = try c.decodeIfPresent(UInt16.self, forKey: .port) ?? port
@@ -185,6 +187,9 @@ public struct ServerConfiguration: Codable {
     }
 
     public func validate() throws {
+        guard ["api", "driver"].contains(inputMode) else {
+            throw ReflectionError.invalid("inputMode must be api or driver")
+        }
         guard version == 1 else { throw ReflectionError.invalid("Unsupported config version") }
         guard !bind.isEmpty, port > 0 else { throw ReflectionError.invalid("bind and port are required") }
         guard token.count == 64, token.allSatisfy({ $0.isHexDigit && $0.isASCII }) else {

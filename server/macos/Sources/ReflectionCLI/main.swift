@@ -25,6 +25,9 @@ Usage: reflection [--config PATH] COMMAND [OPTIONS]
   doctor                          Report permissions, backend capabilities and config health
   status                          Show status and verify the live host control channel
   stop                            Gracefully stop the host using this configuration
+  input status|mode [api|driver]   Inspect or change the live input backend (default: api)
+  driver status|probe|install|uninstall
+                                  Manage the signed virtual HID helper
   start [--dry-run] [--verbose] [--bluetooth] [--tablet-point-events]
                                   Run server; optionally publish native Bluetooth RFCOMM
   help                            Show this help
@@ -68,6 +71,45 @@ func setNested(_ root: inout [String: Any], path: ArraySlice<String>, value: Any
 
 var signalSources = [DispatchSourceSignal]()
 
+func waitForInputMode(_ mode: String, configurationURL: URL) throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + 6
+    var lastError: String?
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        if !HostControl.isRunning(configurationURL: configurationURL) { return }
+        if let data = try? HostControl.requestStatus(configurationURL: configurationURL),
+           let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if status["inputMode"] as? String == mode { return }
+            lastError = status["inputError"] as? String
+        }
+        usleep(100_000)
+    }
+    throw ReflectionError.invalid(lastError ?? "Host could not switch input backend. Driver was not removed.")
+}
+
+func changeInputMode(_ mode: String, configurationURL: URL, removing: Bool = false) throws {
+    if mode == "driver" { try DriverManager.install() }
+    // API permission is checked before altering a running driver session.
+    if mode == "api", HostControl.isRunning(configurationURL: configurationURL),
+       let data = try? HostControl.requestStatus(configurationURL: configurationURL),
+       let status = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+       status["backend"] as? String != "recording", !QuartzTabletBackend.accessibilityTrusted {
+        throw ReflectionError.invalid("Enable Accessibility permission for API Mode before switching or uninstalling the driver.")
+    }
+    var config = try ServerConfiguration.load(from: configurationURL)
+    let previous = config.inputMode
+    config.inputMode = mode
+    try config.save(to: configurationURL)
+    do { try waitForInputMode(mode, configurationURL: configurationURL) }
+    catch {
+        if !removing {
+            var current = try ServerConfiguration.load(from: configurationURL)
+            if current.inputMode == mode { current.inputMode = previous; try current.save(to: configurationURL) }
+        }
+        throw error
+    }
+    if removing { try DriverManager.uninstall() }
+}
+
 func main() throws {
     var args = Array(CommandLine.arguments.dropFirst())
     var configURL = ServerConfiguration.defaultURL
@@ -81,6 +123,39 @@ func main() throws {
     let statusURL = configURL.deletingPathExtension().appendingPathExtension("status.json")
     switch command {
     case "help", "--help", "-h": print(usage)
+    case "input", "driver":
+        guard args.count >= 2 else { throw ReflectionError.invalid("input needs status|mode; driver needs status|probe|install|uninstall") }
+        if command == "driver", args == ["driver", "status"] { try printJSON(DriverManager.status()); return }
+        if command == "input", args == ["input", "status"] {
+            let config = try ServerConfiguration.load(from: configURL)
+            var result: [String: Any] = ["mode": config.inputMode, "driver": DriverManager.status()]
+            if let data = try? HostControl.requestStatus(configurationURL: configURL) {
+                result["host"] = try JSONSerialization.jsonObject(with: data)
+            }
+            try printJSON(result); return
+        }
+        // One lifecycle operation per user; no elevated shell or root daemon is needed.
+        let lockURL = DriverManager.installedBundle.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: lockURL, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let descriptor = open(lockURL.appendingPathComponent(".operation.lock").path, O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { throw ReflectionError.invalid("Cannot lock driver installation") }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw ReflectionError.invalid("Another driver operation is running") }
+        if args == ["driver", "probe"] { try DriverManager.probe(); try printJSON(["available": true]); return }
+        if args == ["driver", "install"] { try DriverManager.install(); try printJSON(DriverManager.status()); return }
+        if args == ["driver", "uninstall"] {
+            if !FileManager.default.fileExists(atPath: configURL.path) {
+                try DriverManager.uninstall()
+                try printJSON(["mode": "api", "driver": DriverManager.status()])
+                return
+            }
+            try changeInputMode("api", configurationURL: configURL, removing: true)
+        }
+        else if command == "input", args.count == 3, args[1] == "mode", ["api", "driver"].contains(args[2]) {
+            try changeInputMode(args[2], configurationURL: configURL)
+        } else { throw ReflectionError.invalid("Invalid input/driver command") }
+        try printJSON(["mode": try ServerConfiguration.load(from: configURL).inputMode, "driver": DriverManager.status()])
     case "config":
         guard args.count >= 2 else { throw ReflectionError.invalid("config needs init, show, set, or validate") }
         switch args[1] {
@@ -113,6 +188,8 @@ func main() throws {
             }
             let updated = try JSONDecoder().decode(ServerConfiguration.self,
                 from: JSONSerialization.data(withJSONObject: object))
+            try updated.validate()
+            if updated.inputMode == "driver" { try DriverManager.install() }
             try updated.save(to: configURL)
             try printJSON(["updated": keys, "restartRequired": true])
         default: throw ReflectionError.invalid("Unknown config command")
@@ -168,6 +245,8 @@ func main() throws {
             "platform": "macOS",
             "accessibilityTrusted": QuartzTabletBackend.accessibilityTrusted,
             "backend": "quartz",
+            "driver": DriverManager.status(),
+            "driverRuntimeChecked": false,
             "virtualHID": false,
             "pressure": true,
             "tilt": true,
@@ -179,7 +258,10 @@ func main() throws {
             "applicationCompatibility": "Quartz tablet-event consumers; application verification required"
         ]
         do {
-            _ = try ServerConfiguration.load(from: configURL)
+            let config = try ServerConfiguration.load(from: configURL)
+            result["inputMode"] = config.inputMode
+            result["backend"] = config.inputMode == "driver" ? "virtual-hid" : "quartz"
+            result["virtualHID"] = config.inputMode == "driver"
             result["configurationValid"] = true
         } catch {
             result["configurationValid"] = false
@@ -217,8 +299,8 @@ func main() throws {
         let mapping = try ScreenMappingState(displays: mappingDisplays(displays), selected: selected,
                                             custom: config.mapping.target)
         let dryRun = args.contains("--dry-run")
-        let backend: TabletBackend = dryRun ? RecordingBackend()
-            : try QuartzTabletBackend(emitTabletPointEvents: args.contains("--tablet-point-events"))
+        let backend = try ManagedTabletBackend(configuration: config, url: configURL,
+            dryRun: dryRun, pointEvents: args.contains("--tablet-point-events"))
         let mapper = CoordinateMapper(configuration: config.mapping, target: mapping.target,
             initialCursor: CGEvent(source: nil)?.location)
         let server = try TabletServer(configuration: config, backend: backend, mapper: mapper,

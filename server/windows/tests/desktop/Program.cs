@@ -90,6 +90,7 @@ internal static class Program
         try
         {
             CheckPressureCurves();
+            CheckDriverControls();
             var appHost = Path.Combine(AppContext.BaseDirectory,
                 "Reflection.Desktop.Tests" + (OperatingSystem.IsWindows() ? ".exe" : ""));
             var fakeExecutable = Path.Combine(AppContext.BaseDirectory, "reflection-host.exe");
@@ -129,7 +130,7 @@ internal static class Program
                 await client.StopAsync();
                 Require(!FakeHostAlive(), "explicit stop releases the running child");
             }
-            Console.WriteLine($"{checks} desktop lifecycle and pressure checks passed");
+            Console.WriteLine($"{checks} desktop lifecycle, pressure and driver control checks passed");
             return 0;
         }
         catch (Exception error)
@@ -147,6 +148,36 @@ internal static class Program
             }
             Directory.Delete(temporary, true);
         }
+    }
+
+    private static void CheckDriverControls()
+    {
+        static DriverState State(bool installed, bool available, bool packageAvailable, string detail) =>
+            DriverState.FromJson(JsonSerializer.SerializeToElement(new
+            {
+                installed, available, packageAvailable, detail = "Device diagnostics",
+                package = new { detail }
+            }));
+        foreach (var reason in new[] { "Package missing", "Package incomplete", "Package untrusted", "Wrong architecture" })
+        {
+            var unavailable = State(false, false, false, reason);
+            Require(!unavailable.CanSelectDriver && !unavailable.CanInstall && !unavailable.CanUninstall,
+                "unavailable packages cannot initiate installation or select Driver Mode");
+            Require(unavailable.PackageDetail == reason && unavailable.DeviceText == "Driver not installed.",
+                "package failure is displayed separately from device installation status");
+        }
+        var ready = State(true, true, false, "Package missing");
+        Require(ready.CanSelectDriver && !ready.CanInstall && ready.CanUninstall,
+            "a usable installed driver does not require a bundled package");
+        var installable = State(false, false, true, "Verified package");
+        Require(installable.CanSelectDriver && installable.CanInstall && !installable.CanUninstall,
+            "verified package enables installation and automatic installation via mode selection");
+        var broken = State(true, false, false, "Package missing");
+        Require(!broken.CanSelectDriver && !broken.CanInstall && broken.CanUninstall,
+            "an unavailable installed driver can still be uninstalled without a package");
+        var repairable = State(true, false, true, "Verified package");
+        Require(repairable.CanSelectDriver && repairable.CanInstall && repairable.CanUninstall,
+            "a verified package allows reinstalling an unavailable driver");
     }
 
     private static void CheckPressureCurves()

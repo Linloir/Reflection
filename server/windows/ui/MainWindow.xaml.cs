@@ -113,6 +113,7 @@ public sealed partial class MainWindow : Window
         loading = true;
         try
         {
+            InputMode.SelectedIndex = config.GetValueOrDefault("input.mode", "api") == "driver" ? 1 : 0;
             MappingMode.SelectedIndex = config["mapping.mode"] == "relative" ? 1 : 0;
             Source.Text = config["mapping.source"];
             Target.Text = config["mapping.target"];
@@ -154,7 +155,59 @@ public sealed partial class MainWindow : Window
         finally { loading = false; }
         RenderCurve();
         await RefreshStatusAsync();
+        await RefreshDriverAsync();
     }
+
+    private async Task RefreshDriverAsync()
+    {
+        var driver = await host.RunAsync("driver", "status");
+        if (closed) return;
+        var state = DriverState.FromJson(driver);
+        DriverStatusText.Text = state.DeviceText;
+        DriverPackageText.Text = state.PackageDetail;
+        DriverModeOption.IsEnabled = state.CanSelectDriver;
+        InstallDriverButton.IsEnabled = state.CanInstall;
+        UninstallDriverButton.IsEnabled = state.CanUninstall;
+    }
+
+    private async Task ChangeInputAsync(params string[] arguments)
+    {
+        try { await host.RunAsync(arguments); }
+        finally
+        {
+            // Preserve other unsaved form values when only the input mode changed.
+            var snapshot = await host.SnapshotAsync();
+            loadedValues["input.mode"] = snapshot.Values.GetValueOrDefault("input.mode", "api");
+            if (snapshot.Values.All(pair => loadedValues.GetValueOrDefault(pair.Key) == pair.Value))
+                revision = snapshot.Revision;
+            loading = true;
+            InputMode.SelectedIndex = snapshot.Values.GetValueOrDefault("input.mode", "api") == "driver" ? 1 : 0;
+            loading = false;
+            await RefreshDriverAsync();
+            await RefreshStatusAsync();
+        }
+        ShowNotice("Input settings applied. Lift the pen before continuing.");
+    }
+
+    private async void InputMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (loading || !ready) return;
+        if (busy)
+        {
+            loading = true;
+            InputMode.SelectedIndex = loadedValues.GetValueOrDefault("input.mode", "api") == "driver" ? 1 : 0;
+            loading = false;
+            return;
+        }
+        var mode = InputMode.SelectedIndex == 1 ? "driver" : "api";
+        await PerformAsync(() => ChangeInputAsync("input", "mode", mode));
+    }
+    private async void InstallDriver_Click(object sender, RoutedEventArgs e) =>
+        await PerformAsync(() => ChangeInputAsync("driver", "install"));
+    private async void UninstallDriver_Click(object sender, RoutedEventArgs e) =>
+        await PerformAsync(() => ChangeInputAsync("driver", "uninstall"));
+    private async void RefreshDriver_Click(object sender, RoutedEventArgs e) =>
+        await PerformAsync(RefreshDriverAsync);
 
     private async Task RefreshProfilesAsync()
     {
@@ -178,7 +231,8 @@ public sealed partial class MainWindow : Window
             : "Stopped";
         StatusDetail.Text = running
             ? $"Port {state.GetProperty("port").GetUInt32()} / {state.GetProperty("samples").GetUInt64()} samples" +
-              (state.GetProperty("dry_run").GetBoolean() ? "\nDry run" : "\nWindows Ink input") +
+              (state.GetProperty("dry_run").GetBoolean() ? "\nDry run" :
+                  state.TryGetProperty("inputMode", out var mode) && mode.GetString() == "driver" ? "\nDriver Mode / virtual HID" : "\nAPI Mode / Windows Ink") +
               (state.GetProperty("restartRequired").GetBoolean() ? "\nSaved settings need a restart." : "")
             : "Ready when you are.";
         StartButton.IsEnabled = !running;
@@ -325,9 +379,10 @@ public sealed partial class MainWindow : Window
     private async void Doctor_Click(object sender, RoutedEventArgs e) => await PerformAsync(async () =>
     {
         var result = await host.RunAsync("doctor");
+        var name = result.GetProperty("backend").GetString();
         ShowNotice(result.GetProperty("available").GetBoolean()
-            ? "Windows Synthetic Pointer APIs are available. Test your target app with Windows Ink enabled."
-            : "Windows Synthetic Pointer APIs are unavailable.", InfoBarSeverity.Informational);
+            ? $"{name} is available. Verify pressure, tilt, eraser and screen mapping in your target app."
+            : $"{name} is unavailable. Check the driver status and host log.", InfoBarSeverity.Informational);
     });
 
     private void DisplayChanged(object sender, SelectionChangedEventArgs e)

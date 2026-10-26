@@ -15,7 +15,8 @@ uint64_t hash_text(const std::string& text) {
 }
 uint64_t fingerprint(const Config& config) {
     std::string text;
-    for (const auto& [key, value] : config_values(config, true)) text += key + '=' + value + '\n';
+    for (const auto& [key, value] : config_values(config, true))
+        if (key != "input.mode") text += key + '=' + value + '\n';
     return hash_text(text);
 }
 std::wstring object_name(const std::filesystem::path& path, const wchar_t* suffix) {
@@ -29,6 +30,7 @@ struct State {
     uint64_t fingerprint, started;
     volatile LONG listening, connected, port, dry_run;
     volatile LONG64 samples;
+    volatile LONG input_mode;
 };
 struct Handle {
     HANDLE value = nullptr;
@@ -108,8 +110,8 @@ struct HostRuntime::Impl {
         if (!mapping.value) throw std::runtime_error("cannot create host status");
         state.value = static_cast<State*>(MapViewOfFile(mapping.value, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(State)));
         if (!state.value) throw std::runtime_error("cannot map host status");
-        *state.value = State{1, GetCurrentProcessId(), fingerprint(config), GetTickCount64(),
-                            0, 0, 0, dry_run ? 1L : 0L, 0};
+        *state.value = State{2, GetCurrentProcessId(), fingerprint(config), GetTickCount64(),
+                            0, 0, 0, dry_run ? 1L : 0L, 0, -1};
         display_mapping = std::make_shared<DisplayMapping>(config, displays);
         input = std::make_shared<HostInput>(config.stabilization);
         mapping_mutex.value = CreateMutexW(nullptr, FALSE, object_name(path, L"-mapping-lock").c_str());
@@ -288,9 +290,11 @@ std::string HostRuntime::mapping_request(const std::filesystem::path& path, unsi
     throw std::runtime_error("live mapping command timed out");
 }
 
-void HostRuntime::event(const std::string& kind, unsigned port, uint64_t samples) {
+void HostRuntime::event(const std::string& kind, unsigned port, uint64_t samples, const std::string& detail) {
     auto& state = *impl_->state.value;
-    if (kind == "listening") {
+    if (kind == "input_mode") {
+        InterlockedExchange(&state.input_mode, detail == "driver" ? 1 : 0);
+    } else if (kind == "listening") {
         InterlockedExchange(&state.port, static_cast<LONG>(port));
         InterlockedExchange(&state.listening, 1);
     } else if (kind == "connected") {
@@ -311,13 +315,15 @@ std::string HostRuntime::status(const std::filesystem::path& path) {
     }
     View view;
     view.value = static_cast<State*>(MapViewOfFile(mapping.value, FILE_MAP_READ, 0, 0, sizeof(State)));
-    if (!view.value || view.value->version != 1)
+    if (!view.value || view.value->version != 2)
         return "{\"running\":false,\"processAlive\":false,\"controlAvailable\":false,\"restartRequired\":false}";
     const auto& state = *view.value;
     bool restart = true;
     try {
         ConfigLock lock(path);
-        restart = state.fingerprint != fingerprint(load_config(path));
+        auto current = load_config(path);
+        // Input mode applies live; all other settings retain their restart semantics.
+        restart = state.fingerprint != fingerprint(current);
     } catch (const std::exception&) {}
     std::ostringstream out;
     out << "{\"running\":true,\"processAlive\":true,\"controlAvailable\":true,\"pid\":" << state.pid
@@ -325,6 +331,7 @@ std::string HostRuntime::status(const std::filesystem::path& path) {
         << ",\"connected\":" << (state.connected ? "true" : "false")
         << ",\"port\":" << state.port << ",\"samples\":" << state.samples
         << ",\"dry_run\":" << (state.dry_run ? "true" : "false")
+        << ",\"inputMode\":" << json_escape(state.input_mode < 0 ? "starting" : state.input_mode ? "driver" : "api")
         << ",\"uptime_ms\":" << GetTickCount64() - state.started
         << ",\"restartRequired\":" << (restart ? "true" : "false") << '}';
     Handle calibration_data,calibration_mutex;

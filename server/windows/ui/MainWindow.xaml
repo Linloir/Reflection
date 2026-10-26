@@ -45,7 +45,7 @@
             <TextBlock Text="Profiles contain mapping and pen settings. Connection credentials stay separate."
                        FontSize="12" TextWrapping="Wrap" />
           </StackPanel>
-          <Button Content="Check input APIs" Click="Doctor_Click" />
+          <Button Content="Check input backend" Click="Doctor_Click" />
         </StackPanel>
       </ScrollViewer>
       <Grid Grid.Column="1" RowSpacing="12">
@@ -53,6 +53,22 @@
         <InfoBar x:Name="Notice" IsOpen="False" IsClosable="True" />
         <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
           <StackPanel x:Name="Settings" Spacing="20">
+            <Expander Header="Input mode" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+              <StackPanel Spacing="12">
+                <ComboBox x:Name="InputMode" Header="Input backend" SelectionChanged="InputMode_Changed">
+                  <ComboBoxItem Content="API Mode (default)" /><ComboBoxItem x:Name="DriverModeOption" Content="Driver Mode (virtual HID)" IsEnabled="False" />
+                </ComboBox>
+                <TextBlock x:Name="DriverStatusText" TextWrapping="Wrap" />
+                <TextBlock x:Name="DriverPackageText" TextWrapping="Wrap" />
+                <TextBlock Text="Driver Mode requires a signed driver package. When one is available, switching installs it if needed and asks for administrator approval. Uninstalling switches this host to API Mode. Lift the pen after switching. HID application and screen mapping support depends on Windows and the target app."
+                           TextWrapping="Wrap" FontSize="12" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Button x:Name="InstallDriverButton" Content="Install driver" Click="InstallDriver_Click" IsEnabled="False" />
+                  <Button x:Name="UninstallDriverButton" Content="Uninstall driver" Click="UninstallDriver_Click" IsEnabled="False" />
+                  <Button Content="Refresh driver status" Click="RefreshDriver_Click" />
+                </StackPanel>
+              </StackPanel>
+            </Expander>
             <Expander Header="Pen stability" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
                 <ToggleSwitch x:Name="StabilizationEnabled" Header="Reduce pen jitter" IsOn="True"

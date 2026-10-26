@@ -215,6 +215,27 @@ struct ReflectionWindow: View {
         VStack(spacing: 18) {
             SettingsCard {
                 VStack(alignment: .leading, spacing: 14) {
+                    Text("Input mode").font(.headline)
+                    Picker("Input backend", selection: Binding(
+                        get: { model.configuration.inputMode },
+                        set: { model.manageInput(["input", "mode", $0]) })) {
+                        Text("API Mode (default)").tag("api")
+                        Text("Driver Mode (virtual HID)").tag("driver")
+                    }.disabled(model.busy || model.hasChanges)
+                    Text((model.driverStatus["installed"] as? Bool == true)
+                         ? "Virtual HID helper installed. Use Check driver to verify device creation."
+                         : "Virtual HID helper not installed.")
+                    HStack {
+                        Button("Install driver") { model.manageInput(["driver", "install"]) }
+                        Button("Uninstall driver") { model.manageInput(["driver", "uninstall"]) }
+                        Button("Check driver") { model.manageInput(["driver", "probe"]) }
+                    }.disabled(model.busy || model.hasChanges)
+                    Text("Driver Mode installs the bundled helper automatically. It requires Apple's virtual HID signing permission. Uninstalling switches to API Mode, which needs Accessibility permission. Save pending edits before changing modes.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
                     Text("Host stabilization").font(.headline)
                     Toggle("Smooth pen movement on this computer", isOn: $model.configuration.stabilization.enabled)
                     HStack {

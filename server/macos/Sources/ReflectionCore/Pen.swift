@@ -156,7 +156,7 @@ private func quantize(_ value: Double, origin: Double, span: Double, steps: Int)
 private func clamp(_ value: Double) -> Double { min(1, max(0, value)) }
 
 public protocol TabletBackend: AnyObject {
-    func submit(_ sample: MappedSample)
+    func submit(_ sample: MappedSample) throws
     func release()
 }
 

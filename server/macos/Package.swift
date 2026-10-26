@@ -12,10 +12,14 @@ let package = Package(
         .library(name: "ReflectionCore", targets: ["ReflectionCore"]),
         .executable(name: "reflection", targets: ["ReflectionCLI"]),
         .executable(name: "reflection-app", targets: ["ReflectionApp"]),
+        .executable(name: "reflection-driver", targets: ["ReflectionDriver"]),
         .executable(name: "reflection-core-checks", targets: ["ReflectionCoreChecks"])
     ],
     targets: [
         .target(name: "ReflectionCore"),
+        .executableTarget(name: "ReflectionDriver", linkerSettings: [
+            .linkedFramework("CoreFoundation"), .linkedFramework("IOKit")
+        ]),
         .executableTarget(name: "ReflectionCLI", dependencies: ["ReflectionCore"],
             exclude: ["Info.plist"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",

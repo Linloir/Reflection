@@ -5,6 +5,15 @@ API，将平板笔事件作为 `PT_PEN` 输入送入当前桌面。桌面应用�
 通过 CLI 的结构化接口控制同一个宿主进程。采样接收、映射和系统输入不依赖
 窗口或 .NET UI 线程，关闭或替换界面不会改变笔输入算法。
 
+默认 API Mode 保持上述行为。可选 Driver Mode 使用 KMDF/VHF 虚拟 HID 驱动，
+UI 和 CLI 提供安装、卸载及即时切换；切换至 Driver Mode 会自动尝试安装，
+卸载前会切回 API Mode。需要已签名驱动包，构建与验证边界见
+[输入模式与驱动](../../docs/input-modes.md)。
+仓库目前不包含正式签名驱动，普通 UI 构建默认只提供 API Mode；
+界面会显示缺包状态并禁用不可用的驱动操作。`scripts/build-driver.ps1`
+生成用于后续签名的完整未签名包，正式签名完成后用
+`scripts/build-ui.ps1 -DriverPackage PATH` 校验并打包。
+
 ## 系统要求与兼容范围
 
 - Windows 10 1809 或更新版本、Windows 11；在交互式用户会话中运行。

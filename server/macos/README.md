@@ -4,6 +4,11 @@ Reflection 把平板的笔输入映射到 Mac 桌面。此子项目使用 Swift�
 CryptoKit 和 CoreGraphics，提供独立的 `ReflectionCore` 库和 `reflection` 命令行。
 当前最低系统版本为 macOS 12，不依赖第三方运行库。
 
+默认 API Mode 使用 Quartz。可选 Driver Mode 使用独立的虚拟 HID 辅助程序，
+UI 和 CLI 支持安装、卸载与即时切换。辅助程序需要 Apple 批准的虚拟 HID 签名权限；
+普通 ad-hoc 构建不会因此自动获得驱动能力。实现方式及发布要求见
+[输入模式与驱动](../../docs/input-modes.md)。
+
 ## 桌面应用
 
 `Reflection.app` 使用原生 SwiftUI 界面，包含连接状态、实时输入诊断、压感曲线、

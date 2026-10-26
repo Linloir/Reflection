@@ -48,6 +48,8 @@ static std::string curve_text(const Mapping& mapping) {
 }
 
 void Config::validate() const {
+    if (input_mode != "api" && input_mode != "driver")
+        throw std::invalid_argument("input.mode must be api or driver");
     mapping.validate();
     stabilization.validate();
     if (target_display.size() > 128 || std::any_of(target_display.begin(), target_display.end(),
@@ -64,6 +66,7 @@ void Config::validate() const {
 
 std::map<std::string, std::string> config_values(const Config& c, bool secrets) {
     return {
+        {"input.mode", c.input_mode},
         {"transport", c.transport},
         {"bind", c.bind}, {"port", std::to_string(c.port)}, {"token", secrets ? c.token : "<redacted>"},
         {"mapping.mode", c.mapping.relative ? "relative" : "absolute"},
@@ -106,7 +109,8 @@ std::string config_revision(const Config& config) {
 }
 
 void set_config(Config& c, const std::string& key, const std::string& value) {
-    if (key == "transport") c.transport = value;
+    if (key == "input.mode") c.input_mode = value;
+    else if (key == "transport") c.transport = value;
     else if (key == "bind") c.bind = value;
     else if (key == "token") c.token = value;
     else if (key == "port") {

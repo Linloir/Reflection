@@ -52,6 +52,7 @@ jobs:
           python3 tools/check_controls.py --server "$native_dir/reflection"
           python3 tools/check_mapping.py --server "$native_dir/reflection"
           python3 tools/check_stability.py --server "$native_dir/reflection"
+          python3 tools/check_input_modes.py --server "$native_dir/reflection"
       - run: bash server/macos/scripts/build-app.sh
       - name: Archive native macOS application
         run: ditto -c -k --sequesterRsrc --keepParent server/macos/build/Reflection.app server/macos/build/Reflection-macOS.zip
@@ -78,6 +79,7 @@ jobs:
       - run: python tools/check_controls.py --server server/windows/build/Release/reflection-host.exe --platform windows
       - run: python tools/check_mapping.py --server server/windows/build/Release/reflection-host.exe --platform windows
       - run: python tools/check_stability.py --server server/windows/build/Release/reflection-host.exe --platform windows
+      - run: python tools/check_input_modes.py --server server/windows/build/Release/reflection-host.exe --platform windows
       - name: Test desktop host lifecycle
         run: dotnet run --project server/windows/tests/desktop/Reflection.Desktop.Tests.csproj -c Release
       - name: Build and publish WinUI desktop application

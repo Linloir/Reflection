@@ -1,4 +1,5 @@
 /build/
+/build-*/
 /.tools/
 /.cache/
 *.exe
@@ -7,6 +8,13 @@
 *.ilk
 *.exp
 *.lib
+# Built driver packages and MSBuild intermediates; keep INF/project/source files.
+*.sys
+*.cat
+*.cab
+*.tlog
+*.lastbuildstate
+*.recipe
 ui/bin/
 ui/obj/
 ui/.vs/

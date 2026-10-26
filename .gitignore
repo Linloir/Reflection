@@ -7,6 +7,14 @@
 *.secret
 *.keystore
 *.jks
+# Local signing keys, certificates and Apple provisioning profiles
+*.pfx
+*.p12
+*.pvk
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
 local.properties
 captures/
 
@@ -35,6 +43,7 @@ Desktop.ini
 DerivedData/
 *.xcuserstate
 xcuserdata/
+*.app/
 
 # Windows / CMake
 out/

@@ -7,6 +7,8 @@ import CoreGraphics
 public struct ServerStatus: Codable {
     public var state = "starting"
     public var backend = "quartz"
+    public var inputMode = "api"
+    public var inputError: String?
     public var authenticated = false
     public var sessions: UInt64 = 0
     public var samples: UInt64 = 0
@@ -86,7 +88,8 @@ public final class TabletServer {
         }
         self.statusURL = statusURL; self.verbose = verbose; self.log = log
         self.tokenKey = try WireProtocol.tokenKey(configuration.token)
-        status.backend = dryRun ? "recording" : "quartz"
+        status.inputMode = (backend as? ManagedTabletBackend)?.mode ?? configuration.inputMode
+        status.backend = dryRun ? "recording" : status.inputMode == "driver" ? "virtual-hid" : "quartz"
     }
 
     /// Executed through the same-user control socket. Pen and mapping changes share one queue.
@@ -310,7 +313,7 @@ public final class TabletServer {
                 if !calibration.status.active { stabilizer.reset(waitForDown: true); mapper.reset() }
             } else if let processed = stabilizer.apply(sample) {
                 let mapped = mapper.map(processed)
-                backend.submit(mapped)
+                try backend.submit(mapped)
                 screenMapping.didSubmit(processed.phase)
                 synchronizeMapper()
                 sendMappingStatus()
@@ -404,6 +407,16 @@ public final class TabletServer {
     }
 
     private func tick() {
+        if let managed = backend as? ManagedTabletBackend {
+            if managed.refresh() {
+                screenMapping.release()
+                stabilizer.reset(waitForDown: true)
+                mapper.reset()
+                status.inputMode = managed.mode
+                if status.backend != "recording" { status.backend = managed.mode == "driver" ? "virtual-hid" : "quartz" }
+            }
+            status.inputError = managed.error
+        }
         let wasCalibrating = calibration.status.active
         calibration.tick()
         if wasCalibrating && !calibration.status.active { stabilizer.reset(waitForDown: true); mapper.reset() }
@@ -454,7 +467,7 @@ public final class TabletServer {
         status.calibration = calibration.status
         status.pendingSendBytes = sendBudget.pendingBytes
         status.sendQueueLimit = sendBudget.limit
-        if let recording = backend as? RecordingBackend {
+        if let recording = (backend as? RecordingBackend) ?? (backend as? ManagedTabletBackend)?.recording {
             status.contactDown = recording.contactDown
             status.backendReleaseCount = recording.releaseCount
         }

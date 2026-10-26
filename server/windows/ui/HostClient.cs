@@ -61,7 +61,9 @@ internal sealed class HostClient : IDisposable
         var output = process.StandardOutput.ReadToEndAsync();
         var errors = process.StandardError.ReadToEndAsync();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var driverOperation = arguments.Length > 1 && (arguments[0] == "driver" || arguments[0] == "input" ||
+            (arguments[0] == "config" && arguments.Contains("driver")));
+        if (!driverOperation) deadline.CancelAfter(TimeSpan.FromSeconds(10));
         try { await process.WaitForExitAsync(deadline.Token); }
         catch (OperationCanceledException)
         {

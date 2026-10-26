@@ -9,6 +9,8 @@ Reflection 优先实现笔输入、低开销传输、坐标映射和系统集成
 
 **当前是可构建、可调试的早期实现，不是完整的虚拟数位板驱动。**
 macOS 使用 Quartz，Windows 使用 Windows Ink / Synthetic Pointer。
+默认使用 API Mode。可选 Driver Mode 的虚拟 HID 后端、UI/CLI 管理和构建源码已加入；
+实际启用需要平台认可的驱动签名或 Apple 虚拟 HID 授权，详见 [输入模式与驱动](docs/input-modes.md)。
 仅接受 WinTab、原始 HID 或特定厂商驱动的应用，不在当前兼容保证之内。
 具体能力和验证边界见 [兼容性说明](docs/compatibility.md)。
 

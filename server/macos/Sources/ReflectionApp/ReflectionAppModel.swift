@@ -26,7 +26,8 @@ private enum HostCommand {
                 do {
                     try process.run()
                     let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6, execute: timeout)
+                    let duration: Double = ["input", "driver"].contains(arguments.first ?? "") ? 30 : 6
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + duration, execute: timeout)
                     let data = pipe.fileHandleForReading.readDataToEndOfFile()
                     process.waitUntilExit()
                     timeout.cancel()
@@ -53,6 +54,7 @@ final class ReflectionAppModel: ObservableObject {
     @Published var profileName = ""
     @Published var status: [String: Any] = [:]
     @Published var diagnostics: [String: Any] = [:]
+    @Published var driverStatus: [String: Any] = DriverManager.status()
     @Published var busy = false
     @Published var running = false
     @Published var error: String?
@@ -377,6 +379,11 @@ final class ReflectionAppModel: ObservableObject {
 
     private func validateStartPermissions(options: HostLaunchOptions) async throws {
         guard !options.dryRun else { return }
+        if configuration.inputMode == "driver" {
+            _ = try await HostCommand.run(executable: executable, configuration: configurationURL,
+                                          arguments: ["driver", "probe"])
+            return
+        }
         // Query the same bundled executable and launch identity that will emit input.
         let data = try await HostCommand.run(executable: executable, configuration: configurationURL,
                                              arguments: ["doctor"])
@@ -387,6 +394,22 @@ final class ReflectionAppModel: ObservableObject {
         diagnostics = report
         guard trusted else {
             throw ReflectionError.invalid("Reflection needs Accessibility permission to send pen input. In Diagnostics, open Accessibility Settings and enable Reflection, then try again. A terminal's permission does not automatically grant access to this app. No host was stopped.")
+        }
+    }
+
+    func manageInput(_ arguments: [String]) {
+        guard !busy, !hasChanges else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                _ = try await HostCommand.run(executable: executable, configuration: configurationURL, arguments: arguments)
+                notice = "Input settings applied. Lift the pen before continuing."
+            } catch { self.error = String(describing: error) }
+            // A failed uninstall may already have switched to API Mode.
+            reloadConfiguration(createIfMissing: false)
+            driverStatus = DriverManager.status()
+            await refreshStatus()
         }
     }
 

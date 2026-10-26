@@ -7,6 +7,7 @@
 namespace reflection {
 
 struct Config {
+    std::string input_mode = "api";
     std::string transport = "tcp";
     std::string bind = "127.0.0.1";
     uint16_t port = 24819;

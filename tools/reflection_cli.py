@@ -118,6 +118,7 @@ def build(target):
     if target in ("server", "all"):
         if platform.system() == "Darwin":
             run(["swift", "build", "--package-path", "server/macos", "-c", "release"])
+            run(["sh", "server/macos/scripts/build-driver.sh"])
         elif platform.system() == "Windows":
             run(["cmake", "-S", "server/windows", "-B", "server/windows/build"])
             run(["cmake", "--build", "server/windows/build", "--config", "Release"])
@@ -169,7 +170,19 @@ def install_server(args):
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / ("reflection-host.exe" if platform.system() == "Windows" else "reflection-host")
     if source.resolve() != target.resolve():
+        driver_name = "driver" if platform.system() == "Windows" else "ReflectionDriver.app"
+        driver_source = source.parent / driver_name
+        driver_target = directory / driver_name
+        if driver_target.exists():
+            raise RuntimeError("Destination already contains a driver package; choose a fresh --destination "
+                               "to avoid retaining or merging an older package")
+        if platform.system() == "Windows" and driver_source.is_dir():
+            result = run([source, "driver", "verify", driver_source], capture=True, check=False)
+            if result.returncode:
+                raise RuntimeError("Driver package verification failed: " + (result.stdout or result.stderr).strip())
         shutil.copy2(source, target)
+        if driver_source.is_dir():
+            shutil.copytree(driver_source, driver_target)
     json_print({
         "installed": str(target),
         "pathEntry": str(directory),

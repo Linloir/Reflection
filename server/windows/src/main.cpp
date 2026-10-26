@@ -1,5 +1,6 @@
 #include "reflection/windows.hpp"
 #include "reflection/runtime.hpp"
+#include "reflection/driver.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <shellapi.h>
@@ -37,6 +38,9 @@ void usage() {
         "  reflection-host [--config PATH] profiles list|save|show|load|delete [NAME] [--replace]\n"
         "  reflection-host [--config PATH] serve [--dry-run] [--transport tcp|bluetooth]\n"
         "  reflection-host [--config PATH] status|stop\n"
+        "  reflection-host [--config PATH] input status|mode [api|driver]\n"
+        "  reflection-host [--config PATH] driver status|install|uninstall\n"
+        "  reflection-host driver verify PACKAGE_DIRECTORY\n"
         "  reflection-host [--config PATH] mapping status|next|previous|all|select [DISPLAY_ID]\n"
         "  reflection-host [--config PATH] calibration status|start|finish|cancel [--json]\n"
         "  reflection-host doctor\n"
@@ -52,6 +56,7 @@ void print_event(const reflection::HostEvent& event) {
     if (event.kind == "listening")
         output << ",\"transport\":" << json_escape(event.detail) << ",\"port\":" << event.port;
     else if (event.kind == "disconnected") output << ",\"reason\":" << json_escape(event.detail);
+    else if (event.kind == "input_mode" || event.kind == "input_error") output << ",\"detail\":" << json_escape(event.detail);
     else if (event.kind == "connected") output << ",\"authenticated\":true";
     else if (event.kind == "session_end") output << ",\"samples\":" << event.samples;
     if (event.pen) {
@@ -94,13 +99,30 @@ int main() {
         }
         if (args.empty() || args[0] == "help" || args[0] == "--help") { usage(); return 0; }
         const auto& command = args[0];
+        if (command == "driver-system") {
+            if (args.size() != 2 || (args[1] != "install" && args[1] != "uninstall"))
+                throw std::invalid_argument("invalid driver system action");
+            driver_system_action(args[1] == "install");
+            return 0;
+        }
         if (command == "version") { std::cout << "{\"version\":\"0.1.0\",\"protocol\":1}\n"; return 0; }
+        if (command == "driver" && args.size() == 3 && args[1] == "verify") {
+            const auto package = inspect_driver_package(std::filesystem::u8path(args[2]));
+            std::cout << package.json() << '\n';
+            return package.available ? 0 : 1;
+        }
         if (command == "doctor") {
-            const bool available = pen_api_available();
-            std::cout << "{\"backend\":\"windows-synthetic-pen\",\"available\":"
+            const auto driver = driver_status();
+            std::string mode = "api";
+            try { ConfigLock lock(path.empty() ? default_config() : path); mode = load_config(path.empty() ? default_config() : path).input_mode; }
+            catch (const std::exception&) {}
+            const bool available = mode == "driver" ? driver.available : pen_api_available();
+            std::cout << "{\"backend\":" << json_escape(mode == "driver" ? "virtual-hid" : "windows-synthetic-pen")
+                      << ",\"inputMode\":" << json_escape(mode) << ",\"available\":"
                       << (available ? "true" : "false")
-                      << ",\"pressure_max\":1024,\"wintab\":false,\"transports\":[\"tcp\",\"bluetooth-rfcomm\"],"
-                         "\"note\":\"API availability does not verify injection into an application\"}\n";
+                      << ",\"driver\":" << driver.json() << ",\"pressure_max\":" << (mode == "driver" ? 65535 : 1024)
+                      << ",\"wintab\":false,\"transports\":[\"tcp\",\"bluetooth-rfcomm\"],"
+                         "\"note\":\"Backend availability does not verify input or pressure precision in an application\"}\n";
             return available ? 0 : 1;
         }
         if (command == "displays") {
@@ -119,6 +141,60 @@ int main() {
             return 0;
         }
         if (path.empty()) path = default_config();
+        if (command == "input" || command == "driver") {
+            if (args.size() < 2) throw std::invalid_argument("input requires status|mode; driver requires status|install|uninstall");
+            if (args[1] == "status" && args.size() == 2) {
+                if (command == "driver") std::cout << driver_status().json() << '\n';
+                else {
+                    ConfigLock lock(path);
+                    const auto current = load_config(path);
+                    // status acquires the same recursive mutex on this thread.
+                    std::cout << "{\"mode\":" << json_escape(current.input_mode)
+                        << ",\"host\":" << HostRuntime::status(path) << ",\"driver\":" << driver_status().json() << "}\n";
+                }
+                return 0;
+            }
+            // Serialize device lifecycle across configurations without holding the config lock during UAC.
+            ConfigLock operation(default_config().parent_path() / "driver-operation");
+            if (command == "driver" && args[1] == "install" && args.size() == 2) {
+                install_driver();
+                std::cout << driver_status().json() << '\n';
+                return 0;
+            }
+            const bool removing = command == "driver" && args[1] == "uninstall" && args.size() == 2;
+            if (!removing && !(command == "input" && args[1] == "mode" && args.size() == 3 &&
+                (args[2] == "api" || args[2] == "driver"))) throw std::invalid_argument("invalid input/driver command");
+            if (removing && !std::filesystem::exists(path)) {
+                uninstall_driver();
+                std::cout << "{\"mode\":\"api\",\"driver\":" << driver_status().json() << "}\n";
+                return 0;
+            }
+            const auto mode = removing ? std::string("api") : args[2];
+            if (mode == "driver") install_driver();
+            std::string previous;
+            {
+                ConfigLock lock(path);
+                auto current = load_config(path); previous = current.input_mode;
+                current.input_mode = mode; save_config(current, path);
+            }
+            bool applied = false;
+            for (unsigned i = 0; i != 60; ++i) {
+                const auto state = HostRuntime::status(path);
+                if (state.find("\"running\":false") != std::string::npos ||
+                    state.find("\"inputMode\":" + json_escape(mode)) != std::string::npos) { applied = true; break; }
+                Sleep(100);
+            }
+            if (!applied) {
+                if (!removing) {
+                    ConfigLock lock(path); auto current = load_config(path);
+                    if (current.input_mode == mode) { current.input_mode = previous; save_config(current, path); }
+                }
+                throw std::runtime_error("host could not switch input backend; inspect the host log. Driver was not removed.");
+            }
+            if (removing) uninstall_driver();
+            std::cout << "{\"mode\":" << json_escape(mode) << ",\"driver\":" << driver_status().json() << "}\n";
+            return 0;
+        }
         if (command == "calibration") {
             if(args.size()<2 || args.size()>3 || (args.size()==3 && args[2]!="--json"))
                 throw std::invalid_argument("calibration requires status|start|finish|cancel [--json]");
@@ -203,6 +279,14 @@ int main() {
                     set_config(config, args[i], args[i + 1]);
                 }
                 config.validate();
+                if (config.input_mode == "driver") {
+                    const auto revision_before = config_revision(load_config(path));
+                    config_lock.reset();
+                    install_driver();
+                    config_lock = std::make_unique<ConfigLock>(path);
+                    if (config_revision(load_config(path)) != revision_before)
+                        throw std::runtime_error("configuration changed during driver installation; retry");
+                }
                 save_config(config, path);
                 std::cout << "{\"saved\":true,\"revision\":" << json_escape(config_revision(config)) << "}\n";
             } else if (args[1] == "validate") {
@@ -261,11 +345,17 @@ int main() {
                 } else throw std::invalid_argument("unknown serve option: " + args[i]);
             }
             config.validate();
+            if (!dry_run && config.input_mode == "driver" && !driver_status(false).installed) {
+                ConfigLock lock(path);
+                auto current = load_config(path);
+                current.input_mode = "api"; save_config(current, path);
+                config.input_mode = "api";
+            }
             HostRuntime runtime(path, config, dry_run, running);
             serve(config, dry_run, running, [&](const HostEvent& event) {
-                runtime.event(event.kind, event.port, event.samples);
+                runtime.event(event.kind, event.port, event.samples, event.detail);
                 if (event.kind != "samples") print_event(event);
-            }, runtime.display_mapping(), runtime.input());
+            }, runtime.display_mapping(), runtime.input(), path);
             return 0;
         }
         throw std::invalid_argument("unknown command: " + command);

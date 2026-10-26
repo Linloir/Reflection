@@ -9,5 +9,6 @@
   <ItemGroup>
     <Compile Include="../../ui/HostClient.cs" Link="HostClient.cs" />
     <Compile Include="../../ui/PressureCurve.cs" Link="PressureCurve.cs" />
+    <Compile Include="../../ui/DriverState.cs" Link="DriverState.cs" />
   </ItemGroup>
 </Project>

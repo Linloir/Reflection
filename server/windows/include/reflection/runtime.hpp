@@ -26,7 +26,7 @@ public:
     ~HostRuntime();
     HostRuntime(const HostRuntime&) = delete;
     HostRuntime& operator=(const HostRuntime&) = delete;
-    void event(const std::string& kind, unsigned port, uint64_t samples);
+    void event(const std::string& kind, unsigned port, uint64_t samples, const std::string& detail = "");
     static std::string status(const std::filesystem::path& path);
     static bool stop(const std::filesystem::path& path);
     std::shared_ptr<DisplayMapping> display_mapping() const;

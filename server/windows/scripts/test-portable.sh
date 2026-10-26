@@ -23,3 +23,10 @@ compiler=${CXX:-c++}
     "$module_dir/src/stabilization.cpp" "$module_dir/tests/stabilization_tests.cpp" \
     -o "$build_dir/reflection-stabilization-tests"
 "$build_dir/reflection-stabilization-tests"
+"$compiler" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+    -I"$module_dir/include" \
+    "$module_dir/src/core.cpp" "$module_dir/src/config.cpp" \
+    "$module_dir/src/stabilization.cpp" "$module_dir/src/tablet_report.cpp" \
+    "$module_dir/tests/input_mode_tests.cpp" \
+    -o "$build_dir/reflection-input-mode-tests"
+"$build_dir/reflection-input-mode-tests"
