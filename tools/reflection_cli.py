@@ -66,11 +66,17 @@ def adb_prefix(serial=None):
     return ["adb", "-s", devices[0]]
 
 
-def broadcast(adb, command, extras=None):
+def android_component(package, component):
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", package):
+        raise ValueError("Invalid Android application ID")
+    return package + "/" + ("." + component if package == PACKAGE else PACKAGE + "." + component)
+
+
+def broadcast(adb, command, extras=None, package=PACKAGE):
     # adb shell reconstructs a command line. Quote each argument for Android's sh
     # independently; no user input is interpolated into an unquoted shell command.
     import shlex
-    args = ["am", "broadcast", "-n", RECEIVER, "--es", "command", command]
+    args = ["am", "broadcast", "-n", android_component(package, "control.ControlReceiver"), "--es", "command", command]
     for key, value in (extras or {}).items():
         kind = "--ez" if isinstance(value, bool) else "--ei" if isinstance(value, int) else "--es"
         args += [kind, key, str(value).lower() if isinstance(value, bool) else str(value)]
@@ -220,10 +226,11 @@ def pair_android(args):
               "mode": args.mode}
     if args.bluetooth:
         values["bluetooth"] = args.bluetooth.upper()
-    json_print(broadcast(adb, "configure", values))
+    package = getattr(args, "package", PACKAGE)
+    json_print(broadcast(adb, "configure", values, **({"package": package} if package != PACKAGE else {})))
     if args.connect:
-        run(adb + ["shell", "am", "start", "-n", PACKAGE + "/.ui.MainActivity"], capture=True)
-        json_print(broadcast(adb, "connect"))
+        run(adb + ["shell", "am", "start", "-n", android_component(package, "ui.MainActivity")], capture=True)
+        json_print(broadcast(adb, "connect", **({"package": package} if package != PACKAGE else {})))
 
 
 def probe(args):
@@ -294,13 +301,16 @@ def parser():
                                      "preview-on", "preview-off", "selftest", "launch",
                                      "stabilization", "stabilization-on", "stabilization-off",
                                      "calibration-start", "calibration-finish",
-                                     "calibration-cancel", "calibration-reset", "tilt"))
-    a.add_argument("tilt_mode", nargs="?", choices=("auto", "standard", "off", "status", "reset"),
-                   help="For android tilt: select capture mode, inspect status, or restart detection")
+                                     "calibration-cancel", "calibration-reset", "tilt", "mapping"))
+    a.add_argument("control_action", nargs="?",
+                   help="For tilt: auto|standard|off|status|reset. For mapping: status|next|previous|all|select")
+    a.add_argument("display_id", nargs="?", help="Display ID for android mapping select")
     a.add_argument("--serial")
+    a.add_argument("--package", default=PACKAGE, help="Android application ID (for an optional side-by-side preview)")
     pair = commands.add_parser("pair-android", help="Copy native server pairing settings over authorized ADB")
     pair.add_argument("--config")
     pair.add_argument("--serial")
+    pair.add_argument("--package", default=PACKAGE, help="Android application ID (for an optional side-by-side preview)")
     pair.add_argument("--mode", choices=("tcp", "bluetooth"), default="tcp")
     pair.add_argument("--host", default="127.0.0.1")
     pair.add_argument("--port", type=int)
@@ -345,24 +355,42 @@ def main(argv=None):
                 command += ["tcp:" + str(args.port)]
             run(adb_prefix(args.serial) + command)
         elif args.command == "android":
-            if args.tilt_mode is not None and args.action != "tilt":
-                raise ValueError("The mode argument is only accepted by android tilt")
+            android_component(args.package, "control.ControlReceiver")
+            def send(command, extras=None):
+                arguments = [adb, command] + ([extras] if extras is not None else [])
+                return broadcast(*arguments, **({"package": args.package} if args.package != PACKAGE else {}))
+            if args.control_action is not None and args.action not in ("tilt", "mapping"):
+                raise ValueError("An additional action is only accepted by android tilt or mapping")
+            if args.display_id is not None and (args.action != "mapping" or args.control_action != "select"):
+                raise ValueError("A display ID is only accepted by android mapping select")
             adb = adb_prefix(args.serial)
-            if args.action == "tilt":
-                if args.tilt_mode == "reset":
-                    json_print(broadcast(adb, "tilt-reset"))
+            if args.action == "mapping":
+                action = args.control_action or "status"
+                if action not in ("status", "next", "previous", "all", "select"):
+                    raise ValueError("Mapping action must be status, next, previous, all, or select")
+                if action == "select" and not args.display_id:
+                    raise ValueError("android mapping select requires a display ID")
+                extras = {"action": action}
+                if args.display_id is not None:
+                    extras["display"] = args.display_id
+                json_print(send("mapping", extras))
+            elif args.action == "tilt":
+                if args.control_action not in (None, "auto", "standard", "off", "status", "reset"):
+                    raise ValueError("Tilt mode must be auto, standard, off, status, or reset")
+                if args.control_action == "reset":
+                    json_print(send("tilt-reset"))
                 else:
-                    json_print(broadcast(adb, "tilt",
-                        {} if args.tilt_mode in (None, "status") else {"mode": args.tilt_mode}))
+                    json_print(send("tilt",
+                        {} if args.control_action in (None, "status") else {"mode": args.control_action}))
             elif args.action == "launch":
-                run(adb + ["shell", "am", "start", "-n", PACKAGE + "/.ui.MainActivity"])
+                run(adb + ["shell", "am", "start", "-n", android_component(args.package, "ui.MainActivity")])
             elif args.action.startswith("preview-"):
-                json_print(broadcast(adb, "preview", {"enabled": args.action == "preview-on"}))
+                json_print(send("preview", {"enabled": args.action == "preview-on"}))
             elif args.action in ("stabilization-on", "stabilization-off"):
-                json_print(broadcast(adb, "stabilization",
+                json_print(send("stabilization",
                                      {"enabled": args.action == "stabilization-on"}))
             else:
-                json_print(broadcast(adb, args.action))
+                json_print(send(args.action))
         elif args.command == "test":
             run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
             if platform.system() != "Windows":

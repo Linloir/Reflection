@@ -54,16 +54,16 @@ Windows 的配置字段是扁平的 `key=value`，区域用逗号分隔。其完
 
 ## UI 与 CLI 的对应关系
 
-| Android 操作 | 根 CLI |
+| 平板与输入操作 | 根 CLI |
 | --- | --- |
 | 配置宿主和密钥 | `pair-android`，或 Android 子项目的 `configure` 命令 |
 | 打开界面 | `android launch` |
 | 连接 / 断开 | `android connect` / `android disconnect` |
 | 开关本地预览 | `android preview-on` / `android preview-off` |
-| 开关防抖 | `android stabilization-on` / `android stabilization-off` |
-| 查看防抖状态 | `android stabilization` |
-| 开始 / 完成校准 | `android calibration-start` / `android calibration-finish` |
-| 取消采集 / 删除校准 | `android calibration-cancel` / `android calibration-reset` |
+| 开关电脑端防抖 | `server config set stabilization.enabled true` / `false` |
+| 查看防抖状态 | `server status` |
+| 开始 / 完成校准 | `server calibration start` / `server calibration finish` |
+| 取消 / 查看校准 | `server calibration cancel` / `server calibration status` |
 | 清除预览 | `android clear` |
 | 查看状态 | `android status` |
 | 查看输入轴 | `android devices` |
@@ -73,8 +73,8 @@ Windows 的配置字段是扁平的 `key=value`，区域用逗号分隔。其完
 Android 控制 Receiver 受系统 `DUMP` 权限保护：普通第三方应用不能调用。
 它不是暴露到网络的远程管理接口。ADB 控制依赖设备已授权的调试通道。
 
-防抖开关与校准保存在客户端，立即生效，不需要重启宿主。默认无需校准即可
-使用；校准步骤、质量检查与算法边界见 [防抖说明](stabilization.md)。
+防抖开关与校准保存在电脑端。普通参数保存后重启宿主生效，校准成功后噪声值
+立即生效。默认无需校准即可使用；步骤、参数与算法边界见 [防抖说明](stabilization.md)。
 
 macOS 提供 SwiftUI 桌面界面，Windows 提供 WinUI 3 桌面界面。
 两端均支持连接状态、启动/停止、曲线、区域、倾斜、输出坐标级数和 profiles。
@@ -95,13 +95,14 @@ macOS 界面直接复用 Swift 配置库；Windows 界面调用原生 CLI 的 JS
 ## 压感曲线与配置档案
 
 Gamma 模式保留原行为；自定义曲线使用 2–32 个控制点，输入必须严格递增，
-输出不能下降，首尾固定为 `(0,0)`、`(1,1)`。控制点之间作线性插值。
+输出不能下降，首尾固定为 `(0,0)`、`(1,1)`。控制点之间可选折线或单调平滑插值。
 非空自定义曲线取代 Gamma，不会再叠加一次 Gamma。抬笔、悬停和取消始终输出零压力。
 
 macOS：
 
 ```bash
 python3 reflection server config set mapping.pressureCurve '[{"input":0,"output":0},{"input":0.25,"output":0.45},{"input":0.75,"output":0.9},{"input":1,"output":1}]'
+python3 reflection server config set mapping.pressureInterpolation '"smooth"'
 python3 reflection server profiles save "Soft pencil"
 python3 reflection server profiles list
 python3 reflection server profiles load "Soft pencil"
@@ -112,6 +113,7 @@ Windows（PowerShell）：
 
 ```powershell
 python reflection server config set mapping.pressure_curve "0,0;0.25,0.45;0.75,0.9;1,1"
+python reflection server config set mapping.pressure_interpolation smooth
 python reflection server profiles save "Soft pencil"
 python reflection server profiles load "Soft pencil"
 python reflection server config set mapping.pressure_curve ""
@@ -120,7 +122,7 @@ python reflection server config set mapping.pressure_curve ""
 profile 包含映射、压力、倾斜和坐标级数，不包含配对密钥、监听地址或端口。
 两端的 profile 文件格式不同，不能直接互换。保存同名 profile 默认拒绝覆盖；
 显式 `--replace` 才会替换。修改或加载 profile 后重新启动宿主生效。
-Android 防抖校准属于设备输入区，不放入桌面 profile。
+防抖参数与噪声校准属于电脑的输入设置，独立于映射 profile。
 
 ## 倾斜与输出坐标级数
 

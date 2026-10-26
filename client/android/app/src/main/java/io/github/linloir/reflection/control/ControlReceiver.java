@@ -35,6 +35,10 @@ public final class ControlReceiver extends BroadcastReceiver {
                 case "calibration-cancel": c.cancelCalibration(); break;
                 case "calibration-reset": c.resetCalibration(); break;
                 case "status": break;
+                case "mapping":
+                    String action = intent.getStringExtra("action");
+                    if (action != null && !action.equals("status")) c.requestMapping(action, intent.getStringExtra("display"));
+                    setResultCode(0); setResultData(c.mappingStatus().toString()); return;
                 case "selftest":
                     if (c.calibrating()) throw new IllegalStateException("Finish or cancel calibration before running a synthetic diagnostic");
                     int count = io.github.linloir.reflection.input.SyntheticDiagnostic.run(c::accept);

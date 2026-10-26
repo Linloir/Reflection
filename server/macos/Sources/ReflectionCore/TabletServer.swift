@@ -2,6 +2,7 @@ import Foundation
 import Network
 import CryptoKit
 import Security
+import CoreGraphics
 
 public struct ServerStatus: Codable {
     public var state = "starting"
@@ -22,13 +23,20 @@ public struct ServerStatus: Codable {
     public var sendQueueLimit = 65536
     public var updatedAt = ""
     public var pid = ProcessInfo.processInfo.processIdentifier
+    public var mapping: MappingStatus?
+    public var stabilization: StabilizationStatus?
+    public var calibration: CalibrationStatus?
 }
 
 /// All mutable session and backend state is confined to one serial queue.
 public final class TabletServer {
     private let configuration: ServerConfiguration
     private let backend: TabletBackend
-    private let mapper: CoordinateMapper
+    private var mapper: CoordinateMapper
+    private var screenMapping: ScreenMappingState
+    private let stabilizer: HostPenStabilizer
+    private let calibration: HostCalibration
+    private let configurationURL: URL?
     private let tokenKey: SymmetricKey
     private let queue = DispatchQueue(label: "org.reflection.server", qos: .userInteractive)
     private let statusQueue = DispatchQueue(label: "org.reflection.status", qos: .utility)
@@ -43,9 +51,14 @@ public final class TabletServer {
     private var connectedAt = 0.0
     private var lastAuthenticatedAt = 0.0
     private var lastSequence: UInt64 = 0
-    private var sampleGuard = PenSessionGuard()
+    private var sampleGuard = PenSequenceGuard()
     private var lastPing: UInt64?
     private var capabilitiesReceived = false
+    private var mappingNegotiated = false
+    private var mappingRequestSequence: UInt64 = 0
+    private var mappingResponseRevision: UInt64 = 0
+    private var lastMappingSentRevision: UInt64 = 0
+    private var lastDisplayRefresh = 0.0
     private var lastStatusWrite = 0.0
     private var sendBudget = OutboundSendBudget()
     private var watchdog: DispatchSourceTimer?
@@ -53,12 +66,99 @@ public final class TabletServer {
 
     public init(configuration: ServerConfiguration, backend: TabletBackend,
                 mapper: CoordinateMapper, dryRun: Bool = false, statusURL: URL? = nil,
-                verbose: Bool = false, log: @escaping (String) -> Void = { print($0) }) throws {
+                verbose: Bool = false, configurationURL: URL? = nil,
+                log: @escaping (String) -> Void = { print($0) }) throws {
         try configuration.validate()
         self.configuration = configuration; self.backend = backend; self.mapper = mapper
+        self.stabilizer = HostPenStabilizer(configuration: configuration.stabilization)
+        self.calibration = HostCalibration(noise: configuration.stabilization.noise)
+        self.configurationURL = configurationURL
+        let displays = try availableDisplays()
+        let selected = configuration.mapping.displayUUID
+            ?? displays.first(where: { $0.id == configuration.mapping.displayID })?.stableID
+            ?? configuration.mapping.displayID.map(String.init)
+        let screenMapping = try ScreenMappingState(displays: mappingDisplays(displays), selected: selected,
+                                                  custom: configuration.mapping.target)
+        self.screenMapping = screenMapping
+        if mapper.target != screenMapping.target {
+            self.mapper = CoordinateMapper(configuration: configuration.mapping, target: screenMapping.target,
+                                           initialCursor: CGEvent(source: nil)?.location)
+        }
         self.statusURL = statusURL; self.verbose = verbose; self.log = log
         self.tokenKey = try WireProtocol.tokenKey(configuration.token)
         status.backend = dryRun ? "recording" : "quartz"
+    }
+
+    /// Executed through the same-user control socket. Pen and mapping changes share one queue.
+    public func mappingCommand(_ command: String) throws -> Data {
+        try queue.sync {
+            refreshDisplayLayout()
+            let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
+            let action: UInt8
+            switch parts.first {
+            case "status": action = 0
+            case "next": action = 1
+            case "previous": action = 2
+            case "all": action = 3
+            case "select": action = 4
+            default: throw ReflectionError.invalid("Unknown mapping command")
+            }
+            guard action == 4 ? parts.count == 2 : parts.count == 1 else {
+                throw ReflectionError.invalid("mapping select requires one display identifier")
+            }
+            var identifier = parts.count == 2 ? parts[1] : ""
+            if action == 4, let numeric = UInt32(identifier),
+               let display = try availableDisplays().first(where: { $0.id == numeric }) { identifier = display.stableID }
+            try screenMapping.request(action, displayID: identifier)
+            synchronizeMapper()
+            sendMappingStatus()
+            persistStatus()
+            return try JSONEncoder().encode(screenMapping.status)
+        }
+    }
+
+    public func calibrationCommand(_ command: String) throws -> Data {
+        try queue.sync {
+            let wasActive = calibration.status.active
+            switch command {
+            case "status": break
+            case "start":
+                guard status.authenticated, stabilizer.rawClient else {
+                    throw ReflectionError.invalid("Connect an updated tablet that sends raw pen samples before calibrating.")
+                }
+                backend.release(); screenMapping.release(); synchronizeMapper(); mapper.reset()
+                stabilizer.reset(waitForDown: true)
+                calibration.start(noise: stabilizer.configuration.noise)
+            case "finish":
+                if let noise = calibration.finish() {
+                    do {
+                        guard let configurationURL else { throw ReflectionError.invalid("The configuration path is unavailable") }
+                        var current = try ServerConfiguration.load(from: configurationURL)
+                        current.stabilization.noise = noise
+                        try current.save(to: configurationURL)
+                        stabilizer.configuration.noise = noise
+                        calibration.complete(noise: noise)
+                    } catch { calibration.fail("Could not save calibration: \(error). Previous noise setting was kept.") }
+                }
+                if wasActive && !calibration.status.active {
+                    backend.release(); screenMapping.release(); synchronizeMapper()
+                    stabilizer.reset(waitForDown: true); mapper.reset()
+                }
+            case "cancel":
+                calibration.cancel()
+                if wasActive {
+                    backend.release(); screenMapping.release(); synchronizeMapper()
+                    stabilizer.reset(waitForDown: true); mapper.reset()
+                }
+            default: throw ReflectionError.invalid("calibration requires start, finish, cancel, or status")
+            }
+            persistStatus()
+            return try JSONEncoder().encode(calibration.status)
+        }
+    }
+
+    public func liveStatus() throws -> Data {
+        try queue.sync { updateStatus(); return try JSONEncoder().encode(status) }
     }
 
     public func start(onFailure: @escaping (Error) -> Void) throws {
@@ -117,10 +217,16 @@ public final class TabletServer {
         decoder = FrameDecoder()
         sessionKey = nil
         lastSequence = 0
-        sampleGuard = PenSessionGuard()
+        sampleGuard = PenSequenceGuard()
+        stabilizer.rawClient = false
+        stabilizer.reset()
         sendBudget.resetSession()
         lastPing = nil
         capabilitiesReceived = false
+        mappingNegotiated = false
+        mappingRequestSequence = 0
+        mappingResponseRevision = 0
+        lastMappingSentRevision = 0
         connectedAt = ProcessInfo.processInfo.systemUptime
         status.authenticated = false
         var bytes = [UInt8](repeating: 0, count: 32)
@@ -196,19 +302,27 @@ public final class TabletServer {
             let sample = try WireProtocol.decodeSample(payload)
             try sampleGuard.accept(sample)
             lastSequence = sample.sequence
-            let mapped = mapper.map(sample)
-            backend.submit(mapped)
             status.samples += 1
             status.lastSequence = sample.sequence
             status.lastSample = sample
-            status.lastMappedX = mapped.point.x; status.lastMappedY = mapped.point.y
-            if verbose {
+            if calibration.status.active {
+                calibration.add(sample)
+                if !calibration.status.active { stabilizer.reset(waitForDown: true); mapper.reset() }
+            } else if let processed = stabilizer.apply(sample) {
+                let mapped = mapper.map(processed)
+                backend.submit(mapped)
+                screenMapping.didSubmit(processed.phase)
+                synchronizeMapper()
+                sendMappingStatus()
+                status.lastMappedX = mapped.point.x; status.lastMappedY = mapped.point.y
+                if verbose {
                 let data = try JSONEncoder().encode(sample)
                 var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
                 object["event"] = "sample"
                 object["mappedX"] = mapped.point.x; object["mappedY"] = mapped.point.y
                 object["mappedPressure"] = mapped.pressure
                 emit(object)
+                }
             }
         case 0x11:
             guard payload.count == 8 else { throw ReflectionError.invalid("Invalid ping") }
@@ -216,12 +330,25 @@ public final class TabletServer {
             guard lastPing == nil || ping > lastPing! else { throw ReflectionError.invalid("Replayed ping") }
             lastPing = ping
             send(type: 0x12, payload: payload)
+            sendMappingStatus()
         case 0x20:
             guard !capabilitiesReceived, lastSequence == 0,
                   let value = try? JSONSerialization.jsonObject(with: payload), value is [String: Any] else {
                 throw ReflectionError.invalid("Invalid capabilities")
             }
             capabilitiesReceived = true
+            struct Capabilities: Decodable { let hostStabilization: Int? }
+            stabilizer.rawClient = (try? JSONDecoder().decode(Capabilities.self, from: payload))?.hostStabilization == 1
+            mappingNegotiated = MappingRequest.supportsControl(in: payload)
+            if mappingNegotiated { sendMappingStatus(force: true) }
+        case 0x21:
+            guard mappingNegotiated else { throw ReflectionError.invalid("Mapping control was not negotiated") }
+            let request = try MappingRequest.decode(payload, after: mappingRequestSequence)
+            mappingRequestSequence = request.sequence
+            try screenMapping.request(request.action, displayID: request.displayID)
+            synchronizeMapper()
+            sendMappingStatus(force: true)
+            persistStatus()
         default:
             throw ReflectionError.invalid("Unknown frame type")
         }
@@ -246,7 +373,44 @@ public final class TabletServer {
         })
     }
 
+    private func sendMappingStatus(force: Bool = false) {
+        guard mappingNegotiated, sessionKey != nil,
+              force || lastMappingSentRevision != screenMapping.revision else { return }
+        var snapshot = screenMapping.status
+        mappingResponseRevision += 1
+        snapshot.revision = mappingResponseRevision
+        guard let data = try? JSONEncoder().encode(snapshot), data.count <= 4062 else {
+            disconnect("mapping_status_too_large"); return
+        }
+        lastMappingSentRevision = screenMapping.revision
+        send(type: 0x22, payload: data)
+    }
+
+    private func synchronizeMapper() {
+        guard mapper.target != screenMapping.target else { return }
+        // ScreenMappingState guarantees the old contact has ended before this target changes.
+        backend.release()
+        stabilizer.reset()
+        mapper = CoordinateMapper(configuration: configuration.mapping, target: screenMapping.target,
+                                  initialCursor: CGEvent(source: nil)?.location)
+    }
+
+    private func refreshDisplayLayout() {
+        if let displays = try? availableDisplays() {
+            try? screenMapping.updateDisplays(mappingDisplays(displays))
+            synchronizeMapper()
+        }
+        lastDisplayRefresh = ProcessInfo.processInfo.systemUptime
+    }
+
     private func tick() {
+        let wasCalibrating = calibration.status.active
+        calibration.tick()
+        if wasCalibrating && !calibration.status.active { stabilizer.reset(waitForDown: true); mapper.reset() }
+        if ProcessInfo.processInfo.systemUptime - lastDisplayRefresh >= 1 {
+            refreshDisplayLayout()
+            sendMappingStatus()
+        }
         if connection != nil {
             let now = ProcessInfo.processInfo.systemUptime
             if sessionKey == nil && now - connectedAt >= 5 { disconnect("handshake_timeout") }
@@ -262,6 +426,11 @@ public final class TabletServer {
         old.stateUpdateHandler = nil
         old.cancel()
         backend.release()
+        stabilizer.reset()
+        stabilizer.rawClient = false
+        if calibration.status.active { calibration.fail("The tablet disconnected. Previous calibration was kept.") }
+        screenMapping.release()
+        synchronizeMapper()
         mapper.reset()
         sessionKey = nil
         nonce = Data()
@@ -277,7 +446,12 @@ public final class TabletServer {
         log(text)
     }
 
-    private func persistStatus() {
+    private func updateStatus() {
+        status.mapping = screenMapping.status
+        status.stabilization = stabilizer.status
+        if calibration.status.active || !status.authenticated { status.stabilization?.active = false }
+        status.stabilization?.legacyClient = status.authenticated && !stabilizer.rawClient
+        status.calibration = calibration.status
         status.pendingSendBytes = sendBudget.pendingBytes
         status.sendQueueLimit = sendBudget.limit
         if let recording = backend as? RecordingBackend {
@@ -285,6 +459,10 @@ public final class TabletServer {
             status.backendReleaseCount = recording.releaseCount
         }
         status.updatedAt = ISO8601DateFormatter().string(from: Date())
+    }
+
+    private func persistStatus() {
+        updateStatus()
         guard let statusURL else { return }
         lastStatusWrite = ProcessInfo.processInfo.systemUptime
         let snapshot = status

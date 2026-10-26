@@ -214,6 +214,62 @@ struct ReflectionWindow: View {
     private var pen: some View {
         VStack(spacing: 18) {
             SettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Host stabilization").font(.headline)
+                    Toggle("Smooth pen movement on this computer", isOn: $model.configuration.stabilization.enabled)
+                    HStack {
+                        Text("Strength")
+                        Slider(value: $model.configuration.stabilization.strength, in: 0...1)
+                        Text("\(Int(model.configuration.stabilization.strength * 100))%")
+                            .monospacedDigit().frame(width: 42)
+                    }.disabled(!model.configuration.stabilization.enabled)
+                    Toggle("Adapt to changing pen noise", isOn: $model.configuration.stabilization.adaptiveNoise)
+                        .disabled(!model.configuration.stabilization.enabled)
+                    Text("Adjusts smoothing limits as pen noise changes. Your saved noise calibration stays unchanged.")
+                        .font(.caption).foregroundColor(.secondary)
+                    Toggle("Steady horizontal and vertical strokes", isOn: $model.configuration.stabilization.independentAxes)
+                        .disabled(!model.configuration.stabilization.enabled)
+                    Text("Experimental. Reduces sideways wobble; may alter fine curves and diagonal strokes.")
+                        .font(.caption).foregroundColor(.secondary)
+                    Text("Save and apply to change smoothing. Jump protection remains active when smoothing is off. Pressure and pen transitions are not delayed.")
+                        .font(.caption).foregroundColor(.secondary)
+                    if model.stabilizationStatus["legacy_client"] as? Bool == true {
+                        Text("This tablet uses an older client. Update it to send raw samples before enabling host smoothing or calibration.")
+                            .font(.caption).foregroundColor(.orange)
+                    }
+                    Text("Saved noise estimate: \(model.configuration.stabilization.noise, specifier: "%.6f") of the tablet surface")
+                        .font(.caption).foregroundColor(.secondary)
+                    if let x = model.stabilizationStatus["estimated_noise_x"] as? Double,
+                       let y = model.stabilizationStatus["estimated_noise_y"] as? Double {
+                        Text("Current noise estimate: X \(x, specifier: "%.6f") · Y \(y, specifier: "%.6f")")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                    Divider()
+                    Text("Calibrate noise").font(.subheadline.weight(.semibold))
+                    Text("Start, then touch down once and hold lightly for at least 1.2 seconds. Small hand drift is OK. Input pauses during calibration; lift the pen before finishing.")
+                        .font(.caption).foregroundColor(.secondary)
+                    if let calibration = model.calibration {
+                        ProgressView(value: calibration.progress)
+                        Text("\(calibration.samples) samples · \(calibration.durationMS / 1000, specifier: "%.1f") s · \(calibration.phase)")
+                            .font(.caption).monospacedDigit()
+                        Text(calibration.reason).font(.caption).foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Button("Start calibration") { model.calibrate("start") }.disabled(model.calibrationActive)
+                        Button("Finish calibration") { model.calibrate("finish") }.disabled(!model.calibrationActive)
+                        Button("Cancel") { model.calibrate("cancel") }.disabled(!model.calibrationActive)
+                    }.disabled(!model.running || model.busy)
+                    DisclosureGroup("Advanced stabilization") {
+                        VStack(spacing: 10) {
+                            HStack { Text("Minimum cutoff (Hz)"); DecimalField("Minimum cutoff", value: $model.configuration.stabilization.minCutoffHz) }
+                            HStack { Text("Speed response"); DecimalField("Speed response", value: $model.configuration.stabilization.beta) }
+                            HStack { Text("Derivative cutoff (Hz)"); DecimalField("Derivative cutoff", value: $model.configuration.stabilization.derivativeCutoffHz) }
+                            HStack { Text("Jump limit (surface fraction)"); DecimalField("Jump limit", value: $model.configuration.stabilization.maxJump) }
+                        }.padding(.top, 10)
+                    }
+                }
+            }
+            SettingsCard {
                 PressureEditor(mapping: $model.configuration.mapping, livePressure: model.rawPressure,
                                hasLiveSample: model.running && !model.lastSample.isEmpty)
             }
@@ -236,19 +292,49 @@ struct ReflectionWindow: View {
     private var mapping: some View {
         VStack(spacing: 18) {
             SettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Text("Active display mapping").font(.headline)
+                        Spacer()
+                        Button("Identify") { model.identifyMapping() }.disabled(!model.running)
+                    }
+                    Text(model.mappingLabel).font(.callout)
+                    if let status = model.liveMapping, model.running {
+                        ScreenLayoutView(status: status) { model.switchMapping("select", displayID: $0) }
+                            .disabled(model.busy)
+                    }
+                    HStack {
+                        Button("All displays") { model.switchMapping("all") }
+                        Button("Previous display") { model.switchMapping("previous") }
+                        Button("Next display") { model.switchMapping("next") }
+                    }.disabled(!model.running || model.busy)
+                    Text("Click a screen to map the tablet to it. All displays follows the arrangement in System Settings, including gaps. Switching waits until you lift the pen.")
+                        .font(.caption).foregroundColor(.secondary)
+                    Toggle("Display switching shortcuts", isOn: $model.mappingShortcutsEnabled)
+                    Text("Control–Option–Page Down / Page Up switches displays; Control–Option–0 maps all displays. Keep Reflection open. Global shortcuts require Reflection's Accessibility permission.")
+                        .font(.caption).foregroundColor(.secondary)
+                    Text("Live changes also appear on a connected tablet. Choose the startup display below to save a default.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            SettingsCard {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Destination").font(.headline)
+                    Text("Startup destination").font(.headline)
                     Picker("Movement", selection: $model.configuration.mapping.mode) {
                         Text("Absolute position").tag("absolute")
                         Text("Relative movement").tag("relative")
                     }
-                    Picker("Display", selection: Binding<UInt32>(
-                        get: { model.configuration.mapping.displayID ?? 0 },
-                        set: { model.configuration.mapping.displayID = $0 == 0 ? nil : $0 })) {
-                            Text("Main display").tag(UInt32(0))
+                    Picker("Display", selection: Binding<String>(
+                        get: { model.configuration.mapping.displayUUID
+                            ?? model.displays.first(where: { $0.id == model.configuration.mapping.displayID })?.stableID ?? "" },
+                        set: {
+                            model.configuration.mapping.displayUUID = $0.isEmpty ? nil : $0
+                            model.configuration.mapping.displayID = nil
+                        })) {
+                            Text("All displays (system layout)").tag("")
                             ForEach(model.displays, id: \.id) { display in
                                 Text("Display \(display.id) - \(display.pixelWidth) x \(display.pixelHeight)")
-                                    .tag(display.id)
+                                    .tag(display.stableID)
                             }
                         }.disabled(model.configuration.mapping.target != nil)
                     Toggle("Custom desktop area", isOn: Binding(

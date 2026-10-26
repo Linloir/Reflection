@@ -37,6 +37,8 @@ void usage() {
         "  reflection-host [--config PATH] profiles list|save|show|load|delete [NAME] [--replace]\n"
         "  reflection-host [--config PATH] serve [--dry-run] [--transport tcp|bluetooth]\n"
         "  reflection-host [--config PATH] status|stop\n"
+        "  reflection-host [--config PATH] mapping status|next|previous|all|select [DISPLAY_ID]\n"
+        "  reflection-host [--config PATH] calibration status|start|finish|cancel [--json]\n"
         "  reflection-host doctor\n"
         "  reflection-host displays\n"
         "  reflection-host version\n"
@@ -117,6 +119,28 @@ int main() {
             return 0;
         }
         if (path.empty()) path = default_config();
+        if (command == "calibration") {
+            if(args.size()<2 || args.size()>3 || (args.size()==3 && args[2]!="--json"))
+                throw std::invalid_argument("calibration requires status|start|finish|cancel [--json]");
+            unsigned action;
+            if(args[1]=="status") action=0; else if(args[1]=="start") action=1;
+            else if(args[1]=="finish") action=2; else if(args[1]=="cancel") action=3;
+            else throw std::invalid_argument("unknown calibration action");
+            std::cout<<HostRuntime::calibration_request(path,action)<<'\n'; return 0;
+        }
+        if (command == "mapping") {
+            if (args.size() < 2) throw std::invalid_argument("mapping requires status, next, previous, all or select");
+            unsigned action = 0;
+            if (args[1] == "status") action = 0;
+            else if (args[1] == "next") action = 1;
+            else if (args[1] == "previous") action = 2;
+            else if (args[1] == "all") action = 3;
+            else if (args[1] == "select") action = 4;
+            else throw std::invalid_argument("unknown mapping command");
+            if (args.size() != (action == 4 ? 3u : 2u)) throw std::invalid_argument("mapping select requires DISPLAY_ID; other mapping commands take no arguments");
+            std::cout << HostRuntime::mapping_request(path, action, action == 4 ? args[2] : "") << '\n';
+            return 0;
+        }
         if (command == "status" || command == "stop") {
             if (args.size() != 1) throw std::invalid_argument("status/stop take no arguments");
             if (command == "status") std::cout << HostRuntime::status(path) << '\n';
@@ -241,7 +265,7 @@ int main() {
             serve(config, dry_run, running, [&](const HostEvent& event) {
                 runtime.event(event.kind, event.port, event.samples);
                 if (event.kind != "samples") print_event(event);
-            });
+            }, runtime.display_mapping(), runtime.input());
             return 0;
         }
         throw std::invalid_argument("unknown command: " + command);

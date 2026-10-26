@@ -53,16 +53,56 @@
         <InfoBar x:Name="Notice" IsOpen="False" IsClosable="True" />
         <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
           <StackPanel x:Name="Settings" Spacing="20">
+            <Expander Header="Pen stability" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+              <StackPanel Spacing="12">
+                <ToggleSwitch x:Name="StabilizationEnabled" Header="Reduce pen jitter" IsOn="True"
+                              OnContent="Adaptive smoothing on this computer" OffContent="Raw pen movement" />
+                <Slider x:Name="StabilizationStrength" Header="Smoothing strength" Minimum="0" Maximum="1" Value="0.5" StepFrequency="0.05" />
+                <TextBlock Text="Lower strength follows fine movement more closely. Higher strength steadies a still pen. Sudden invalid jumps are protected in both modes."
+                           TextWrapping="Wrap" FontSize="12" />
+                <TextBlock x:Name="StabilityStatus" Text="Start the host to see input diagnostics." TextWrapping="Wrap" FontSize="12" />
+                <ToggleSwitch x:Name="AdaptiveNoise" Header="Adapt to changing pen noise" IsOn="True"
+                              OnContent="Estimate horizontal and vertical noise while writing" OffContent="Use the calibrated noise level" />
+                <TextBlock x:Name="NoiseStatus" Text="Noise estimates become available while using the pen." TextWrapping="Wrap" FontSize="12" />
+                <Border Background="{ThemeResource ControlFillColorDefaultBrush}" CornerRadius="8" Padding="16">
+                  <StackPanel Spacing="10">
+                    <TextBlock Text="Calibrate pen noise" FontWeight="SemiBold" />
+                    <TextBlock Text="Start here, then hold the pen lightly on one spot in the tablet input area for 2-3 seconds. Small hand drift is OK. Pen input is paused during calibration."
+                               TextWrapping="Wrap" FontSize="12" />
+                    <ProgressBar x:Name="CalibrationProgress" Minimum="0" Maximum="1" Value="0" />
+                    <TextBlock x:Name="CalibrationStatus" Text="No calibration in progress." TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                      <Button x:Name="CalibrateStart" Content="Start calibration" Click="CalibrationStart_Click" />
+                      <Button x:Name="CalibrateFinish" Content="Finish and apply" IsEnabled="False" Click="CalibrationFinish_Click" />
+                      <Button x:Name="CalibrateCancel" Content="Cancel" IsEnabled="False" Click="CalibrationCancel_Click" />
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+                <Expander Header="Advanced smoothing parameters" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                  <StackPanel Spacing="10">
+                    <ToggleSwitch x:Name="IndependentAxes" Header="Steady horizontal and vertical strokes" IsOn="False"
+                                  OnContent="Extra sideways smoothing" OffContent="Balanced smoothing" />
+                    <TextBlock Text="Experimental. Reduces sideways wobble; may alter fine curves and diagonal strokes." FontSize="12" TextWrapping="Wrap" />
+                    <NumberBox x:Name="MinCutoff" Header="Still-pen cutoff (Hz)" Minimum="0.1" Maximum="60" Value="3" SmallChange="0.5" SpinButtonPlacementMode="Inline" />
+                    <TextBlock Text="Lower values smooth more at low speed; higher values respond faster." FontSize="12" TextWrapping="Wrap" />
+                    <NumberBox x:Name="SpeedBeta" Header="Speed response (beta)" Minimum="0" Maximum="1000" Value="80" SmallChange="10" SpinButtonPlacementMode="Inline" />
+                    <TextBlock Text="Higher values reduce smoothing sooner as you move faster." FontSize="12" TextWrapping="Wrap" />
+                    <NumberBox x:Name="DerivativeCutoff" Header="Speed estimate cutoff (Hz)" Minimum="0.1" Maximum="120" Value="12" SmallChange="1" SpinButtonPlacementMode="Inline" />
+                    <NumberBox x:Name="Noise" Header="Calibrated noise (fraction of tablet area)" Minimum="0.00001" Maximum="0.02" Value="0.0006" SmallChange="0.0001" SpinButtonPlacementMode="Inline" />
+                    <NumberBox x:Name="MaxJump" Header="Sudden jump limit (fraction of tablet area)" Minimum="0.05" Maximum="1" Value="0.25" SmallChange="0.05" SpinButtonPlacementMode="Inline" />
+                    <Button Content="Restore smoothing defaults" Click="StabilizationDefaults_Click" />
+                  </StackPanel>
+                </Expander>
+              </StackPanel>
+            </Expander>
             <Expander Header="Pressure response" IsExpanded="True" HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
                 <ComboBox x:Name="PressureMode" Header="Curve mode" SelectionChanged="CurveChanged" SelectedIndex="0">
-                  <ComboBoxItem Content="Gamma" /><ComboBoxItem Content="Custom points" />
+                  <ComboBoxItem Content="Gamma" /><ComboBoxItem Content="Linear points" /><ComboBoxItem Content="Smooth curve" />
                 </ComboBox>
                 <NumberBox x:Name="Gamma" Header="Gamma (0.1-10)" Minimum="0.1" Maximum="10" Value="1"
                            SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="GammaChanged" />
-                <TextBox x:Name="CurvePoints" Header="Custom input,output points" Text="0,0;0.25,0.1;0.75,0.9;1,1"
-                         TextChanged="CurveTextChanged" PlaceholderText="0,0;0.5,0.25;1,1" />
                 <StackPanel Orientation="Horizontal" Spacing="8">
                   <Button Content="Soft" Tag="0.65" Click="Preset_Click" />
                   <Button Content="Linear" Tag="1" Click="Preset_Click" />
@@ -71,25 +111,58 @@
                 <Border Background="{ThemeResource ControlFillColorDefaultBrush}" CornerRadius="6" Padding="12">
                   <StackPanel Spacing="6">
                     <TextBlock Text="Output pressure" FontSize="12" />
-                    <Canvas x:Name="CurveCanvas" Height="150" SizeChanged="CurveSizeChanged"
+                    <Canvas x:Name="CurveCanvas" Height="220" ManipulationMode="None" SizeChanged="CurveSizeChanged"
                             PointerPressed="CurvePointerPressed" PointerMoved="CurvePointerMoved"
                             PointerReleased="CurvePointerReleased" PointerCanceled="CurvePointerReleased"
                             PointerCaptureLost="CurveCaptureLost" Background="Transparent" />
-                    <TextBlock Text="Input pressure - drag interior points in custom mode" FontSize="12" />
+                    <TextBlock Text="Input pressure: 0% to 100%. Click to add a point; drag to shape the response." FontSize="12" TextWrapping="Wrap" />
                   </StackPanel>
                 </Border>
+                <Grid ColumnSpacing="10">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                  <NumberBox x:Name="SelectedInput" Header="Input (%)" Minimum="0" Maximum="100" ValueChanged="SelectedPointChanged" IsEnabled="False" />
+                  <NumberBox x:Name="SelectedOutput" Grid.Column="1" Header="Output (%)" Minimum="0" Maximum="100" ValueChanged="SelectedPointChanged" IsEnabled="False" />
+                  <Button x:Name="RemovePoint" Grid.Column="2" Content="Remove point" VerticalAlignment="Bottom" IsEnabled="False" Click="RemovePoint_Click" />
+                </Grid>
                 <TextBlock x:Name="CurveValidation" TextWrapping="Wrap" FontSize="12" />
+                <Expander Header="Point coordinates" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                  <TextBox x:Name="CurvePoints" Header="Input,output pairs (0-1)" Text="0,0;0.25,0.1;0.75,0.9;1,1"
+                           TextChanged="CurveTextChanged" PlaceholderText="0,0;0.5,0.25;1,1" />
+                </Expander>
               </StackPanel>
             </Expander>
-            <Expander Header="Mapping, tilt and coordinate resolution" HorizontalAlignment="Stretch"
+            <Expander Header="Screens and mapping" IsExpanded="True" HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
+                <TextBlock x:Name="ActiveMappingText" Text="Reading screen layout..." FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" />
+                <TextBlock x:Name="MappingDetail" TextWrapping="Wrap" FontSize="12" />
+                <Border Background="{ThemeResource ControlFillColorDefaultBrush}" CornerRadius="8" Padding="12">
+                  <Canvas x:Name="ScreenCanvas" Height="180" SizeChanged="ScreenCanvas_SizeChanged" />
+                </Border>
+                <TextBlock Text="Click a screen to map the whole tablet to it. All screens follows the Windows display layout. Switches wait until you lift the pen."
+                           TextWrapping="Wrap" FontSize="12" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Button Content="All screens" Click="AllScreens_Click" />
+                  <Button Content="Previous" Click="PreviousScreen_Click" />
+                  <Button Content="Next screen" Click="NextScreen_Click" />
+                  <Button Content="Identify" Click="IdentifyScreens_Click" />
+                </StackPanel>
+                <ToggleSwitch x:Name="ScreenShortcuts" Header="Screen switching shortcuts" IsOn="True" Toggled="ScreenShortcuts_Toggled" />
+                <TextBlock x:Name="ShortcutHint" Text="Ctrl+Alt+PageUp / PageDown: previous / next screen. Ctrl+Alt+0: all screens. Keep this window open (it can be minimized)."
+                           TextWrapping="Wrap" FontSize="12" />
+                <ToggleSwitch x:Name="ShowCursor" Header="Show pen position" IsOn="True" OnContent="Visible Windows pen feedback" OffContent="Follow Windows pen settings" />
+                <TextBlock Text="Pen feedback is independent of the mouse arrow. Save and restart to change this option."
+                           TextWrapping="Wrap" FontSize="12" />
+                <TextBlock Text="Startup mapping and pen settings" FontWeight="SemiBold" Margin="0,8,0,0" />
+                <TextBlock Text="Screen buttons change the current session. Save a startup target below to keep it for the next launch."
+                           TextWrapping="Wrap" FontSize="12" />
                 <ComboBox x:Name="MappingMode" Header="Mapping mode" SelectedIndex="0">
                   <ComboBoxItem Content="absolute" /><ComboBoxItem Content="relative" />
                 </ComboBox>
                 <TextBox x:Name="Source" Header="Tablet region (normalized x,y,width,height)" />
-                <TextBox x:Name="Target" Header="Desktop target (desktop or x,y,width,height in physical pixels)" />
-                <ComboBox x:Name="Displays" Header="Choose a display" SelectionChanged="DisplayChanged" />
+                <ComboBox x:Name="Displays" Header="Startup screen" SelectionChanged="DisplayChanged" HorizontalAlignment="Stretch" />
+                <TextBox x:Name="Target" Header="Startup target (desktop, display:ID or x,y,width,height)" />
+                <Button Content="Use active mapping at startup" Click="UseActiveMapping_Click" />
                 <ComboBox x:Name="Rotation" Header="Rotation" SelectedIndex="0">
                   <ComboBoxItem Content="0" /><ComboBoxItem Content="90" />
                   <ComboBoxItem Content="180" /><ComboBoxItem Content="270" />

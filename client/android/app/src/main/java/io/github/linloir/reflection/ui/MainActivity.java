@@ -21,6 +21,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import io.github.linloir.reflection.control.Controller;
 import io.github.linloir.reflection.input.PenInput;
+import io.github.linloir.reflection.core.MappingState;
 
 /** Deliberately small diagnostic UI over the same controller as the CLI. */
 public final class MainActivity extends Activity {
@@ -28,9 +29,13 @@ public final class MainActivity extends Activity {
     private InkView ink;
     private EditText host, port, token, bluetoothAddress;
     private TextView status;
-    private CheckBox preview, bluetooth, stabilization;
+    private CheckBox preview, bluetooth;
     private RadioGroup tiltModes;
     private TextView tiltDiagnostics;
+    private TextView mappingLabel, mappingDialogLabel;
+    private MappingView mappingDiagram;
+    private LinearLayout mappingButtons, mappingChoices;
+    private String displayedMappingChoices = "";
     private long displayedConfigurationRevision;
     private final Handler handler = new Handler();
     private final Runnable update = new Runnable() {
@@ -39,9 +44,8 @@ public final class MainActivity extends Activity {
             String value = controller.statusLine();
             if (!value.contentEquals(status.getText())) status.setText(value);
             if (preview.isChecked() != controller.preview()) { preview.setChecked(controller.preview()); ink.invalidate(); }
-            if (stabilization.isChecked() != controller.stabilizationEnabled())
-                stabilization.setChecked(controller.stabilizationEnabled());
             refreshTiltDialog();
+            refreshMapping();
             ink.refreshSettings(); handler.postDelayed(this, 1000);
         }
     };
@@ -51,7 +55,7 @@ public final class MainActivity extends Activity {
         controller = Controller.get(this);
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(12), dp(8), dp(12), 0);
-        TextView title = new TextView(this); title.setText("Reflection / tablet input"); title.setTextSize(20); root.addView(title);
+        TextView title = new TextView(this); title.setText(getApplicationInfo().loadLabel(getPackageManager()) + " / tablet input"); title.setTextSize(20); root.addView(title);
         LinearLayout address = new LinearLayout(this);
         host = field("Host", controller.host(), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         port = field("Port", String.valueOf(controller.port()), InputType.TYPE_CLASS_NUMBER);
@@ -76,28 +80,70 @@ public final class MainActivity extends Activity {
         button(controls, "Clear", v -> { controller.clearPreview(); ink.refreshSettings(); });
         button(controls, "Tilt", v -> showTiltSettings());
         root.addView(controls);
+        LinearLayout mappingRow = new LinearLayout(this); mappingRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        // Keep live host status from changing the input surface height in the middle of a stroke.
+        mappingLabel = new TextView(this); mappingLabel.setTextSize(12); mappingLabel.setLines(2);
+        mappingRow.addView(mappingLabel, new LinearLayout.LayoutParams(0, -2, 3));
+        button(mappingRow, "Screens", v -> showMapping()); root.addView(mappingRow);
         preview = new CheckBox(this); preview.setText("Local preview (standard Android rendering)"); preview.setChecked(controller.preview());
         preview.setOnCheckedChangeListener((button, checked) -> { controller.setPreview(checked); if (ink != null) ink.invalidate(); }); root.addView(preview);
-        stabilization = new CheckBox(this); stabilization.setText("Reduce pen jitter"); stabilization.setChecked(controller.stabilizationEnabled());
-        stabilization.setOnCheckedChangeListener((button, checked) -> {
-            if (checked == controller.stabilizationEnabled()) return;
-            try { controller.setStabilization(checked); }
-            catch (Exception e) {
-                stabilization.setChecked(controller.stabilizationEnabled());
-                Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show();
-            }
-        });
-        root.addView(stabilization);
-        LinearLayout calibration = new LinearLayout(this);
-        button(calibration, "Calibrate", v -> calibrationAction(() -> { ink.cancelInput(); controller.startCalibration(); }));
-        button(calibration, "Finish", v -> calibrationAction(controller::finishCalibration));
-        button(calibration, "Cancel", v -> calibrationAction(controller::cancelCalibration));
-        button(calibration, "Reset", v -> calibrationAction(controller::resetCalibration));
-        root.addView(calibration);
         status = new TextView(this); status.setTextSize(12); status.setLines(2); root.addView(status);
         ink = new InkView(this, controller); root.addView(ink, new LinearLayout.LayoutParams(-1, 0, 1));
         displayedConfigurationRevision = controller.configurationRevision();
         setContentView(root);
+    }
+
+    private void showMapping() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(16), dp(8), dp(16), 0);
+        mappingDialogLabel = new TextView(this); content.addView(mappingDialogLabel);
+        mappingDiagram = new MappingView(this, id -> switchMapping("select", id));
+        content.addView(mappingDiagram, new LinearLayout.LayoutParams(-1, dp(180)));
+        mappingButtons = new LinearLayout(this);
+        button(mappingButtons, "Previous", v -> switchMapping("previous", null));
+        button(mappingButtons, "All screens", v -> switchMapping("all", null));
+        button(mappingButtons, "Next", v -> switchMapping("next", null)); content.addView(mappingButtons);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        mappingChoices = new LinearLayout(this); mappingChoices.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(mappingChoices); content.addView(scroll, new LinearLayout.LayoutParams(-1, dp(110)));
+        displayedMappingChoices = "";
+        TextView help = new TextView(this); help.setTextSize(12);
+        help.setText("Tap a screen to map the whole tablet to it. All screens follows the computer's display layout. "
+            + "A switch during a stroke waits until you lift the pen."); content.addView(help);
+        refreshMapping();
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Screen mapping").setView(content)
+            .setPositiveButton("Close", null).create();
+        dialog.setOnDismissListener(d -> {
+            mappingDialogLabel = null; mappingDiagram = null; mappingButtons = null; mappingChoices = null;
+        }); dialog.show();
+    }
+
+    private void switchMapping(String action, String display) {
+        try { controller.requestMapping(action, display); }
+        catch (Exception error) { Toast.makeText(this, error.getMessage(), Toast.LENGTH_LONG).show(); }
+    }
+
+    private void refreshMapping() {
+        MappingState current = controller.mapping();
+        String label = current == null ? "Screen mapping: connect to an updated host" : "Mapping: " + current.label();
+        if (mappingLabel != null && !label.contentEquals(mappingLabel.getText())) mappingLabel.setText(label);
+        if (mappingDialogLabel == null) return;
+        if (!label.contentEquals(mappingDialogLabel.getText())) mappingDialogLabel.setText(label);
+        mappingDiagram.update(current);
+        for (int i = 0; i < mappingButtons.getChildCount(); i++) mappingButtons.getChildAt(i).setEnabled(current != null);
+        StringBuilder identity = new StringBuilder();
+        if (current != null) for (MappingState.Display display : current.displays)
+            identity.append(display.id).append('\n').append(display.name).append('\n');
+        String choices = identity.toString();
+        if (!choices.equals(displayedMappingChoices)) {
+            displayedMappingChoices = choices; mappingChoices.removeAllViews();
+            if (current != null) for (int i = 0; i < current.displays.size(); i++) {
+                MappingState.Display display = current.displays.get(i);
+                Button option = new Button(this); option.setAllCaps(false);
+                option.setText((i + 1) + ": " + display.name + (display.primary ? " (primary)" : ""));
+                option.setOnClickListener(v -> switchMapping("select", display.id)); mappingChoices.addView(option);
+            }
+        }
     }
     private void syncConfiguration() {
         // External CLI changes replace the form once; periodic status refresh preserves drafts.
@@ -153,7 +199,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onResume() { super.onResume(); handler.post(update); }
     @Override protected void onPause() {
-        controller.cancelCalibration(); ink.cancelInput(); handler.removeCallbacks(update); super.onPause();
+        ink.cancelInput(); handler.removeCallbacks(update); super.onPause();
     }
     @Override protected void onDestroy() { handler.removeCallbacks(update); super.onDestroy(); }
     private EditText field(String hint, String value, int type) {
@@ -161,12 +207,6 @@ public final class MainActivity extends Activity {
     }
     private void button(LinearLayout parent, String text, View.OnClickListener click) {
         Button button = new Button(this); button.setText(text); button.setOnClickListener(click); parent.addView(button, new LinearLayout.LayoutParams(0, -2, 1));
-    }
-    private void calibrationAction(Runnable action) {
-        try { action.run(); }
-        catch (Exception e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); }
-        ink.refreshSettings();
-        status.setText(controller.statusLine());
     }
     private int dp(int value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
 }

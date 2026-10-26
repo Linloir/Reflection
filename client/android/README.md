@@ -11,9 +11,10 @@
 | 倾斜 | Auto / Standard / Off；标准轴转换、异常后有界恢复，以及限定 Note2 输入的一维兼容恢复 |
 | 橡皮擦 | `TOOL_TYPE_ERASER`；侧键映射为两个独立按钮位 |
 | 悬停 | hover enter / move / exit；支持设备才会产生相应事件 |
+| 屏幕映射 | 显示宿主机屏幕布局、当前目标，切换全部屏幕或指定屏幕；需要支持映射控制的宿主机 |
 | 历史采样 | 逐点读取 `MotionEvent` 历史；Android 11+ 仅在笔/橡皮擦落笔时请求 unbuffered dispatch，旧系统保留正常批处理 |
 | 防误触 | 只接受 stylus / eraser 工具，不把手指触摸当成笔 |
-| 防抖 | 默认启用自适应坐标平滑；原样开关、可选静止噪声校准，预览与传输一致 |
+| 防抖 | 平板发送原始归一化坐标；防抖和校准由电脑宿主统一管理，避免两端重复过滤 |
 | USB | 通过 ADB reverse 将本机 TCP 连接转发到宿主机 |
 | Wi-Fi / 有线 IP / 蓝牙 PAN | 使用同一 TCP 通道；Wi-Fi 要求客户端可达宿主机监听地址 |
 | 蓝牙 Classic | 连接已配对宿主机发布的 Reflection RFCOMM 服务；使用相同认证协议 |
@@ -41,6 +42,18 @@
 ```sh
 gradle :app:assembleDebug
 ```
+
+如果另一台开发机签名的旧应用需要保留，可构建并排安装的预览包，无需卸载旧应用或清除数据：
+
+```sh
+gradle :app:assembleDebug -PreflectionApplicationId=io.github.linloir.reflection.preview
+```
+
+预览包名称为 **Reflection Preview**，使用独立配置，需要重新配对。
+辅助脚本通过 `--package io.github.linloir.reflection.preview` 操作它，例如
+`./scripts/reflection-android --package io.github.linloir.reflection.preview status`。
+不传 Gradle 属性时仍生成原有 `io.github.linloir.reflection` 应用；每次构建产物都位于
+`app/build/outputs/apk/debug/app-debug.apk`，分发前请按用途另存。
 
 ## 安装和 USB 连接
 
@@ -99,19 +112,21 @@ Android 11 及更低版本不需要 `grant-bluetooth`。客户端不扫描附近
 | `devices` | Android 输入设备的 axis range、分辨率等声明 |
 | `paired` | 列出系统已经配对的蓝牙设备 |
 | `preview on` / `preview off` | 开关普通 Android 本地笔迹预览 |
-| `stabilization on` / `off` / `status` | 开关防抖或读取状态；关闭后坐标原样通过 |
-| `calibration start` / `finish` / `cancel` / `reset` | 开始、完成、取消采集或删除校准数据 |
+| `stabilization status` | 返回 `managedBy: host` 和 `rawCoordinates: true`；旧版 `on` 命令提示到电脑端设置 |
+| `calibration start` / `finish` / `reset` | 兼容保留的命令，明确提示校准已迁移到电脑端，不拦截平板输入 |
 | `tilt [auto\|standard\|off\|status]` | 设置并保存倾斜模式；省略参数时读取状态 |
 | `tilt reset` | 重新识别当前输入格式，不改变模式、累计计数或防抖校准 |
+| `mapping [status\|query\|next\|previous\|all]` | 查看宿主映射或切换屏幕；`query` 请求宿主重新发送状态 |
+| `mapping select DISPLAY_ID` | 将整个平板书写区映射到指定宿主屏幕 |
 | `clear` | 清空演示界面的本地预览 |
 | `selftest` | 明确生成六个 synthetic 笔样本，测试 Android 事件适配与网络路径 |
 
 CLI 使用显式 `ControlReceiver`，接收器要求平台 `android.permission.DUMP`，普通第三方应用没有该权限。ADB shell 与系统可以调用；配置、状态和 UI 共用 `Controller`，没有另一套隐藏行为。
 
-默认防抖不要求校准。界面提供 Reduce pen jitter、Calibrate、Finish、Cancel、
-Reset，和 CLI 调用相同控制器。校准时的笔输入留在平板，旧宿主笔接触会释放；
-有效的新结果保存成功后才替换旧结果。详细步骤与细节保留边界见
-[防抖与校准](../../docs/stabilization.md)。
+防抖和校准设置位于电脑端。平板界面只保留采集、连接、倾斜和屏幕映射；
+历史上保存的客户端防抖开关和校准数据不会参与当前输入路径。能力帧中的
+`hostStabilization: 1` 表示发送的是未做客户端平滑的原始坐标；预览也使用同一原始样本。
+详细步骤见 [防抖与校准](../../docs/stabilization.md)。
 
 不使用辅助脚本时，也可以直接执行：
 
@@ -124,6 +139,25 @@ adb shell am broadcast -n io.github.linloir.reflection/.control.ControlReceiver 
 `selftest` 会向当前连接发送落笔、移动、不同压力和抬笔。它可能使宿主机当前应用收到输入，因此仅在专门的测试画布或诊断后端中运行。返回的 `synthetic: true` 和 `hardwareVerified: false` 表示它不验证物理笔、实际延迟或设备压感。
 
 `status` 中的 `rttMicros` 是网络心跳往返耗时，不能当作笔尖到显示的端到端延迟。
+
+### 多屏映射
+
+连接新版宿主后，平板顶部显示当前映射目标。点击 **Screens** 打开布局图，屏幕的位置、
+大小和主屏标记来自电脑的显示器排列；点击布局中的屏幕或列表中的名称即可选择。
+**All screens** 恢复整个桌面映射，**Previous** / **Next** 在单块屏幕间切换。
+切换请求与笔事件按同一队列发送，落笔期间由宿主延迟到抬笔后应用，避免一笔跨屏跳跃。
+这里切换的是宿主目标，平板采集区域和本地防抖设置不变。
+
+```sh
+./scripts/reflection-android mapping status
+./scripts/reflection-android mapping next
+./scripts/reflection-android mapping all
+```
+
+`status.mapping` 包含 `supported`、`mode`、`selected`、`target`、`displays` 和 `pending`。
+显示器 ID 必须取自当前状态，不能假定它们连续或与界面编号相同。
+`pending: true` 表示宿主收到切换请求，但当前笔画尚未结束。断线后清除映射状态；
+旧宿主仍可正常接收笔输入，只是不启用这些按钮，不向它发送未知控制帧。
 
 ### 倾斜可靠性
 
@@ -195,13 +229,18 @@ Onyx 的低延迟本地墨迹 SDK 是后续独立渲染适配层的候选。当�
 
 ## 模块与稳定性策略
 
-- `core/`：不可变笔样本、自适应防抖与噪声校准、二进制协议、HMAC；不依赖 Android UI。
+- `core/`：不可变笔样本、屏幕映射状态、二进制协议、HMAC；旧防抖/校准算法仅保留作兼容参考与测试，不在采集路径执行。
 - `input/`：将 `MotionEvent` 和历史样本转换为标准笔样本，验证设备数值范围。
 - `transport/`：TCP / RFCOMM 字节流、会话认证、心跳、有界队列和重连。
 - `control/`：持久配置和公共控制接口，UI 与 CLI 都经此入口。
 - `ui/`：可替换的演示界面与普通 Canvas 本地预览。
 
-采集不执行网络 I/O。256 个样本的队列满时断开并清空，避免持续累积延迟或静默丢失关键落笔/抬笔边沿；宿主机必须在断开时释放笔状态。重连后不会续传缺少落笔的旧笔画。每 500ms 发送心跳；握手与读写均有截止时间，蓝牙阻塞 I/O 也会由 watchdog 关闭。离开采集界面或书写区域大小改变会发送取消，避免持续按下。
+采集不执行网络 I/O。256 个样本/控制消息的队列满时断开并清空，避免持续累积延迟或静默丢失关键落笔/抬笔边沿；宿主机必须在断开时释放笔状态。重连后不会续传缺少落笔的旧笔画。每 500ms 发送心跳；握手与读写均有截止时间，蓝牙阻塞 I/O 也会由 watchdog 关闭。离开采集界面或书写区域大小改变会发送取消，避免持续按下。
+
+一笔的接触状态同时绑定输入设备与 pointer ID，指针索引重排不会换到手掌坐标；
+接触期间忽略独立 hover 流，额外手指的 down/up/cancel 不结束笔画。
+每笔固定归一化尺寸；取消后必须等到新的 down 才继续传送接触点，不把旧 move 伪装成 hover。
+非有限坐标和倒序历史点不会被夹到屏幕边缘。`status.inputDiagnostics` 提供忽略事件和非法坐标计数。
 
 Android 10 及更早版本使用正常的系统输入批处理，避免旧版 `ViewRootImpl` 在切换
 立即交付模式时留下待处理输入，进而触发“没有响应”。历史点仍按原始时间和顺序逐点

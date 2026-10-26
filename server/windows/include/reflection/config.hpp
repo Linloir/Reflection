@@ -1,5 +1,6 @@
 #pragma once
 #include "reflection/core.hpp"
+#include "reflection/stabilization.hpp"
 #include <filesystem>
 #include <map>
 
@@ -11,7 +12,10 @@ struct Config {
     uint16_t port = 24819;
     std::string token;
     Mapping mapping;
+    StabilizationConfig stabilization;
     bool target_virtual_desktop = true;
+    std::string target_display;
+    bool show_cursor = true;
     void validate() const;
 };
 

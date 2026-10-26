@@ -146,6 +146,69 @@ Capability declarations are informational. A declaration does not prove that
 the physical pen, firmware, and target application expose or consume that
 axis correctly.
 
+### Host-side stabilization
+
+The optional top-level numeric field `"hostStabilization":1` declares that the
+client sends raw normalized coordinates, with no client-side position smoothing.
+Supporting hosts may apply their configured coordinate filter and collect noise
+calibration locally. Absent this declaration, the host disables its position
+smoothing to avoid stacking it with older Android filtering. Input continuity
+protection remains enabled for both kinds of client. This capability adds no
+wire message types or sample fields, and older hosts can ignore it.
+
+Calibration is controlled by the computer UI/CLI, not by unauthenticated network
+commands. During calibration the host receives the original samples but releases
+system contact and suppresses injection. After completion or cancellation a new
+DOWN is required before contact input resumes. Changing the input device or
+surface orientation during a stroke must cancel the old stroke; it must not
+reinterpret its remaining coordinates using new geometry.
+
+### Negotiated screen mapping control
+
+The optional top-level numeric field `"mappingControl":1` opts a client into
+the screen-control extension. A supporting host replies with an authenticated
+`0x22` mapping snapshot. A client **must wait for that response** before sending
+`0x21` controls. Hosts send no extension frames to clients that did not opt in;
+older hosts ignore the capability and continue accepting ordinary pen input.
+The existing v1 handshake, pen sample layout, and heartbeat layout are unchanged.
+
+`0x21` unsigned payloads contain a positive, strictly increasing u64 request
+sequence followed by a one-byte action: `0` query, `1` next display, `2` previous
+display, `3` all displays, or `4` select display. Only action `4` appends a UTF-8
+display ID of 1..128 bytes. Other actions have exactly nine payload bytes.
+Invalid, unauthenticated, replayed, or unnegotiated requests terminate the session.
+
+`0x22` unsigned payloads are bounded UTF-8 JSON objects:
+
+```json
+{
+  "revision": 1,
+  "mode": "display",
+  "selected": "platform-display-id",
+  "target": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+  "pending": false,
+  "displays": [
+    {"id": "platform-display-id", "name": "Display 1", "primary": true,
+     "x": 0, "y": 0, "width": 1920, "height": 1080}
+  ]
+}
+```
+
+Modes are `all`, `display`, and `custom`. Each response revision strictly
+increases within its connection. Display lists contain at most 16 entries;
+the complete authenticated frame must still fit the 4096-byte body limit.
+Rectangles use the host's desktop coordinate system and may have negative
+origins. Windows reports physical pixels; macOS reports CoreGraphics desktop
+coordinates. IDs are opaque and must be copied from the host, never inferred
+from screen numbering. Unknown snapshot fields may be ignored.
+
+Hosts send an initial snapshot, answer controls, and deliver changed state by
+the next heartbeat. The target in a snapshot is the **active** target; `pending`
+means a switch is waiting for the current stroke to end. The UP sample maps
+to the old screen, and the next stroke uses the new screen. Disconnect/cancel
+also releases the stroke. Live switching does not rewrite startup settings.
+Mapping snapshots do not replace pongs or extend the client's pong deadline.
+
 ## Backpressure and reconnection
 
 Use `TCP_NODELAY` for TCP. Keep input buffers bounded. An overwhelmed sender

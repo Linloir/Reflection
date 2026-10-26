@@ -26,6 +26,13 @@ Invoke-Checked "dotnet" @(
     "-p:Platform=$Architecture", "-p:ReflectionHostPath=$hostExecutable", "-o", $publishDirectory
 )
 
+# XAML compilation alone is not enough: the unpackaged app resolves these at startup.
+foreach ($resource in @("App.xbf", "MainWindow.xbf", "Reflection.Desktop.pri")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory $resource))) {
+        throw "Published application is missing $resource; do not distribute this directory."
+    }
+}
+
 if ($InstallDirectory) {
     New-Item -ItemType Directory -Force $InstallDirectory | Out-Null
     Copy-Item -Path (Join-Path $publishDirectory "*") -Destination $InstallDirectory -Recurse -Force

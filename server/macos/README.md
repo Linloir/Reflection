@@ -130,7 +130,7 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 ## 配置与 CLI
 
 所有控制能力都由 CLI 提供，桌面界面使用相同核心库和主机程序。运行中的服务使用启动时的
-配置快照，修改配置后需重新启动。
+配置快照，修改配置后需重新启动；`mapping` 命令可以只切换当前会话的屏幕，无需重连或重启。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -147,6 +147,12 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 | `profiles delete NAME` | 删除指定 profile，保持当前配置 |
 | `pair` | 显示配对所需协议版本、端口和密钥 |
 | `displays` | 列出显示器 ID、桌面区域及物理像素尺寸 |
+| `mapping status` | 查询当前映射、屏幕布局和等待抬笔的切换 |
+| `mapping next` / `mapping previous` | 按系统布局从左到右、从上到下切换单块屏幕 |
+| `mapping all` | 将所有屏幕的联合桌面映射到平板输入区域 |
+| `mapping select ID` | 锁定指定屏幕；接受稳定的 `stableID` 或当前数字 ID |
+| `calibration start` / `calibration finish` | 开始主机噪声校准或完成估计并立即保存应用 |
+| `calibration status` / `calibration cancel` | 查看进度、失败原因或取消采集 |
 | `doctor` | 输出授权、配置、后端和显示器诊断 |
 | `start` | 前台运行，使用 Ctrl-C 或 SIGTERM 安全退出 |
 | `start --dry-run` | 认证、解码和映射，使用记录后端 |
@@ -158,6 +164,79 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 `status` 的快照文件与配置同目录，名称为 `server.status.json`，或随自定义配置文件名
 变化。快照通常每秒更新，包含样本数、会话数、最后样本、最后映射坐标和断连原因；
 记录后端另外提供 `contactDown`、`backendReleaseCount`，便于验证断线自动抬笔。
+
+### 多屏映射与平板联动
+
+未指定 `mapping.target`、`mapping.displayUUID` 或旧版 `mapping.displayID` 时，默认映射
+所有活动屏幕的联合矩形，保留系统布局、负坐标与屏幕之间的空隙。单屏选择优先使用
+`displays` 输出的 `stableID`（CoreGraphics 显示器 UUID）；旧配置的数字 ID 仍然可读。
+自定义区域保持独立。系统布局会定期刷新；所选屏幕断开后回退到所有活动屏幕，并在状态中
+返回 `fallback: true`；保留所请求的屏幕 UUID，重新连接时自动恢复单屏映射。恢复同样等待
+当前笔画结束，主动选择所有屏幕或另一块屏幕则取消旧选择。最多支持 16 块屏幕。
+
+桌面 UI 的 Mapping 页面包含可点击的布局预览、所有屏幕/上一屏/下一屏和 Identify。
+屏幕切换会在对应屏幕上短暂显示提示，提示窗口不抢焦点、不截获鼠标。绘制中发起的切换
+会等待抬笔、取消或断开；当前笔画的落笔与抬笔始终使用同一映射。
+
+保持桌面 UI 打开时，可启用 `Control–Option–Page Down` / `Page Up` 切换屏幕，
+`Control–Option–0` 切换所有屏幕。全局键盘监测需要授予 **Reflection 桌面应用**辅助功能
+权限；仅授权终端不足以让应用在后台接收快捷键。可在 Mapping 中关闭快捷键。
+
+新版 Android 客户端通过经过认证的可选映射控制扩展接收布局与当前屏幕，也可请求切换。
+旧客户端继续使用笔输入协议，不会收到无法识别的扩展帧。实时切换仅影响当前运行的服务；
+要保留启动默认值，在 Startup destination 中选择屏幕并保存配置。
+
+该多屏状态机及请求校验已通过独立 Swift 检查。完整 AppKit/Quartz 构建、快捷键权限、
+真实显示器热插拔和通知位置需要在 macOS 上执行 `swift test`、应用构建与实机验证。
+
+### 主机防抖、跳变防护与校准
+
+新版平板只发送原始坐标；主机在坐标映射前进行速度自适应 One-Euro 防抖，不等待定时器、
+不积攒笔事件。低速时抑制抖动，高速时提高截止频率，并按噪声估计限制滤波偏移。
+Pen response 页面可开关防抖、调整强度；保存并应用后生效。旧客户端没有声明
+`hostStabilization: 1` 时主机不叠加平滑，避免两端重复过滤，但仍保留跳变防护。
+
+| 配置 | 默认值 | 作用 |
+| --- | --- | --- |
+| `stabilization.enabled` | `true` | 主机平滑开关 |
+| `stabilization.strength` | `0.5` | 强度 0..1；0 输出原始坐标 |
+| `stabilization.minCutoffHz` | `3` | 低速截止频率，0.1..60 Hz |
+| `stabilization.beta` | `80` | 随速度提高截止频率的系数，0..1000 |
+| `stabilization.derivativeCutoffHz` | `12` | 速度估计截止频率，0.1..120 Hz |
+| `stabilization.noise` | `0.0006` | 归一化坐标噪声，校准后更新 |
+| `stabilization.maxJump` | `0.25` | 单样本异常位移界限，平板表面比例 0.05..1 |
+
+跳变防护独立于平滑开关：落笔与近期悬浮位置严重不一致时拒绝该笔画；接触期间出现突跳、
+重复 DOWN 或 HOVER 会在最后可信位置取消笔画，并等待真实结束事件。单次异常 HOVER
+先隔离，连续的新位置才确认重定位；孤立 MOVE 不会被转为鼠标移动。UP 在最后接受位置
+抬笔，避免把平滑后的笔画末端突然拉到原始噪声点。退出感应区域后下一次正常 DOWN 可恢复。
+
+校准需要新版原始输入客户端已连接。点击 Start calibration 后，系统输入暂停；在平板上
+一次落笔轻放至少 1.2 秒、采集至少 120 个样本，进度就绪后抬笔并选择 Finish calibration。
+160 ms 短窗会去除缓慢漂移，再用残差 MAD 与窗口的 75% 分位数估计噪声，因此允许轻微
+手漂和少量离群值。明显移动、接触中断、采样不足或 10 秒超时会给出具体原因；失败与取消
+保留原设置。成功只合并保存最新配置中的 `stabilization.noise`，并立即用于当前主机。
+同一时间戳内的合法历史样本只保留一个校准测量点；UP/DOWN 生命周期仍照常处理。
+结束后必须重新落笔才恢复接触输入。防抖设置属于主机配置；mapping profile 仍只保存映射
+和压力设置，不包含防抖或校准值。
+
+`status` 提供实时的 `stabilization`（包括 `contact_down`、跳变拒绝计数、旧客户端状态）
+和 `calibration`；`calibration` 子命令也接受 `--json`。校准数据只在内存中保存，不保存笔迹。
+
+### 压力控制点
+
+`mapping.pressureInterpolation` 默认为 `"linear"`，保留旧配置的分段直线行为；设为
+`"smooth"` 使用单调 PCHIP 三次 Hermite 插值。两种模式共用 2..32 个控制点，经过所有节点，
+输出始终位于相邻节点之间，不发生过冲。空控制点仍使用 Gamma。
+
+Pressure response 编辑器可选择 Gamma、Straight segments 或 Smooth curve；点击图中空白处
+添加点，拖动节点改变曲线，也可输入精确数值或删除内部节点。端点固定在 `(0,0)` 与 `(1,1)`。
+平滑开关和控制点随 mapping profile 保存。
+
+算法参考：[One-Euro filter 原论文](https://gery.casiez.net/publications/CHI2012-casiez.pdf)、
+[PCHIP 形状保持插值](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.PchipInterpolator.html)。
+主机滤波、校准和压力曲线已通过实际 Swift 核心源码的可移植检查；macOS 系统输入与 SwiftUI
+仍需在 Mac 上构建和实测，Windows 上的语法检查不能替代平台验证。
 它是上次运行的快照，需结合 `processAlive`、`updatedAt` 和 `state` 判断当前状态。
 `processAlive` 通过同用户本机控制通道确认，停止请求不依赖状态文件中可能过期的 PID。
 `stop` 返回后可查询 `status`，确认 `processAlive` 为 `false` 后启动下一实例。

@@ -1,12 +1,14 @@
 package io.github.linloir.reflection.transport;
 
 import io.github.linloir.reflection.core.PenSample;
+import io.github.linloir.reflection.core.MappingState;
 import io.github.linloir.reflection.core.Wire;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
@@ -17,7 +19,15 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class PenTransport {
     private final DuplexLink.Factory factory;
     private final byte[] token;
-    private final ArrayBlockingQueue<PenSample> samples = new ArrayBlockingQueue<>(256);
+    private static final class Outbound {
+        final PenSample sample;
+        final int action;
+        final String display;
+        final DuplexLink link;
+        Outbound(PenSample sample) { this.sample = sample; action = -1; display = ""; link = null; }
+        Outbound(int action, String display, DuplexLink link) { sample = null; this.action = action; this.display = display; this.link = link; }
+    }
+    private final ArrayBlockingQueue<Outbound> samples = new ArrayBlockingQueue<>(256);
     private final AtomicLong sent = new AtomicLong(), overflows = new AtomicLong();
     private volatile boolean running, connected;
     private volatile DuplexLink socket;
@@ -27,6 +37,7 @@ public final class PenTransport {
     });
     private volatile String status = "Disconnected";
     private volatile long rttMicros;
+    private volatile MappingState mapping;
     private Thread worker;
 
     public PenTransport(DuplexLink.Factory factory, String tokenHex) {
@@ -47,14 +58,26 @@ public final class PenTransport {
 
     public void submit(PenSample sample) {
         if (!connected) return;
-        if (!samples.offer(sample)) {
+        if (!samples.offer(new Outbound(sample))) {
             overflows.incrementAndGet(); status = "Queue overflow; reconnecting"; connected = false;
             closeSocket(); samples.clear();
         }
     }
 
+    /** Queued with samples so switching can never overtake an already submitted pen transition. */
+    public void requestMapping(int action, String display) {
+        MappingState.request(1, action, display); // Validate before entering the queue.
+        DuplexLink current = socket;
+        if (!connected || mapping == null)
+            throw new IllegalStateException("The connected host has not enabled screen mapping controls");
+        if (!samples.offer(new Outbound(action, display, current)))
+            throw new IllegalStateException("Input queue is busy; retry after lifting the pen");
+    }
+
+    public MappingState mapping() { return connected ? mapping : null; }
+
     public synchronized void stop() {
-        running = false; connected = false; closeSocket(); samples.clear();
+        running = false; connected = false; mapping = null; closeSocket(); samples.clear();
         if (worker != null) worker.interrupt();
         status = "Disconnected"; watchdog.shutdownNow();
     }
@@ -82,22 +105,27 @@ public final class PenTransport {
                 if (!running) break;
                 current.setReadTimeout(2500);
                 responseDeadline = System.nanoTime() + 2500000000L;
-                samples.clear(); connected = true; status = "Connected"; retryMillis = 250;
-                Wire.write(out, 0x20, "{\"platform\":\"android\",\"features\":[\"pressure\",\"tilt\",\"eraser\",\"hover\"],\"deviceDependent\":true}".getBytes(StandardCharsets.UTF_8), session);
+                samples.clear(); mapping = null; connected = true; status = "Connected"; retryMillis = 250;
+                Wire.write(out, 0x20, "{\"platform\":\"android\",\"features\":[\"pressure\",\"tilt\",\"eraser\",\"hover\"],\"deviceDependent\":true,\"mappingControl\":1,\"hostStabilization\":1}".getBytes(StandardCharsets.UTF_8), session);
                 Thread reader = new Thread(() -> readResponses(connectedLink, in, session), "reflection-transport-read");
                 reader.setDaemon(true); reader.start();
-                long sequence = 0, timestamp = 0, lastPing = 0;
+                long sequence = 0, timestamp = 0, lastPing = 0, mappingSequence = 0;
                 boolean touching = false;
                 while (running && connected && !current.isClosed()) {
-                    PenSample sample = samples.poll(100, TimeUnit.MILLISECONDS);
+                    Outbound next = samples.poll(100, TimeUnit.MILLISECONDS);
+                    PenSample sample = next == null ? null : next.sample;
                     if (sample != null) {
                         if (sample.phase == PenSample.DOWN) touching = true;
                         // Reconnection must never continue a stroke whose DOWN was lost.
                         if ((sample.phase != PenSample.MOVE && sample.phase != PenSample.UP) || touching) {
-                            timestamp = Math.max(timestamp + 1, sample.timeNanos);
+                            // Android's millisecond clock can give distinct history points the same time.
+                            // Sequence orders those points; never invent a 1 ns sampling interval.
+                            timestamp = Math.max(timestamp, sample.timeNanos);
                             Wire.write(out, 0x10, Wire.pen(sample, ++sequence, timestamp), session); sent.incrementAndGet();
                         }
                         if (sample.phase == PenSample.UP || sample.phase == PenSample.CANCEL || sample.phase == PenSample.LEAVE) touching = false;
+                    } else if (next != null && next.link == current && mapping != null) {
+                        Wire.write(out, 0x21, MappingState.request(++mappingSequence, next.action, next.display), session);
                     }
                     long now = System.nanoTime();
                     if (now - lastPing >= 500000000L) {
@@ -109,7 +137,7 @@ public final class PenTransport {
             } catch (InterruptedException e) {
                 if (running) status = "Connection interrupted";
             } finally {
-                connected = false; responseDeadline = 0; samples.clear();
+                connected = false; mapping = null; responseDeadline = 0; samples.clear();
                 if (current != null) try { current.close(); } catch (IOException ignored) {}
             }
             if (running) {
@@ -120,10 +148,18 @@ public final class PenTransport {
     }
 
     private void readResponses(DuplexLink current, DataInputStream in, byte[] session) {
-        long lastEcho = -1;
+        long lastEcho = -1, lastMappingRevision = 0;
         try {
             while (running && connected && !current.isClosed()) {
                 byte[] message = Wire.verify(Wire.read(in), session);
+                if (message[1] == 0x22) {
+                    MappingState next = MappingState.decode(Arrays.copyOfRange(message, 2, message.length));
+                    if (next.revision <= lastMappingRevision) throw new IOException("Invalid or replayed mapping status");
+                    lastMappingRevision = next.revision;
+                    if (socket == current) mapping = next;
+                    // Only a valid pong extends the host's liveness deadline.
+                    continue;
+                }
                 Wire.require(message, 0x12, 10);
                 long echo = ByteBuffer.wrap(message, 2, 8).getLong();
                 long elapsed = System.nanoTime() - echo;

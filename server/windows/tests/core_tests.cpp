@@ -1,5 +1,6 @@
 #include "reflection/config.hpp"
 #include "reflection/protocol.hpp"
+#include "reflection/display_mapping.hpp"
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -174,6 +175,102 @@ int main() {
 
         Config config; config.token = std::string(64, 'a');
         config.validate();
+        {
+            std::vector<Display> screens{{"main", {0, 0, 1920, 1080}, true},
+                {"left", {-1280, -200, 1280, 1024}, false}};
+            DisplayMapping live(config, [&] { return screens; });
+            Sample point; point.phase = Phase::hover;
+            auto mapped = live.map(point);
+            require(near(mapped.x, -1280) && near(mapped.y, -200), "all-display mapping follows negative OS layout");
+            point.x = 1; point.y = 1;
+            mapped = live.map(point);
+            require(near(mapped.x, 1919) && near(mapped.y, 1079), "all-display union preserves monitor arrangement");
+            for (const unsigned steps : {0u, 4096u}) {
+                auto locked_config = config;
+                set_config(locked_config, "mapping.target", "display:left");
+                locked_config.mapping.position_steps_x = locked_config.mapping.position_steps_y = steps;
+                DisplayMapping locked(locked_config, [&] { return screens; });
+                for (const double edge : {1.0, std::nextafter(1.0, 0.0), 1.0 - 1e-7}) {
+                    Sample edge_point; edge_point.phase = Phase::hover; edge_point.x = edge_point.y = edge;
+                    const auto edge_mapped = locked.map(edge_point);
+                    // Windows monitor rectangles are right/bottom exclusive. Include the backend's rounding.
+                    require(std::llround(edge_mapped.x) <= -1 && std::llround(edge_mapped.y) <= 823,
+                            "locked negative display right/bottom edge cannot spill after pixel rounding");
+                }
+            }
+            live.request(4, "main");
+            point.x = 0.5; point.y = 0.5; point.phase = Phase::down;
+            const auto down = live.map(point);
+            live.request(4, "left");
+            require(live.status().find("\"pending\":true") != std::string::npos &&
+                    live.selected_display() == "main", "switch during stroke is deferred");
+            point.phase = Phase::move;
+            require(near(live.map(point).x, down.x), "deferred switch cannot tear the current stroke");
+            point.phase = Phase::up;
+            require(near(live.map(point).x, down.x), "pen up is mapped using original target");
+            point.phase = Phase::hover;
+            require(live.map(point).x < 0 && live.selected_display() == "left", "switch applies after pen up");
+            point.phase = Phase::down;
+            const auto before_unplug = live.map(point);
+            screens.pop_back(); live.refresh();
+            const auto pending_topology = live.status();
+            require(live.selected_display() == "left" && pending_topology.find("\"id\":\"left\"") != std::string::npos &&
+                    pending_topology.find("\"pending\":true") != std::string::npos,
+                    "unplug during contact retains consistent selected display and active topology");
+            point.phase = Phase::move;
+            require(near(live.map(point).x, before_unplug.x), "hot-unplug cannot remap an active stroke");
+            point.phase = Phase::up;
+            require(near(live.map(point).x, before_unplug.x), "hot-unplug maps up on original display");
+            require(live.selected_display() == "main" && live.status().find("\"fallback\":true") != std::string::npos,
+                    "unplugged selected monitor falls back to primary and reports it");
+            require(live.status().find("\"id\":\"left\"") == std::string::npos,
+                    "active topology commits atomically with fallback selection after release");
+            screens.push_back({"left", {-1280, -200, 1280, 1024}, false}); live.refresh();
+            require(live.selected_display() == "left", "reconnected selected display restores mapping");
+            live.request(1);
+            require(live.selected_display() == "main", "next display wraps deterministically");
+            live.request(2);
+            require(live.selected_display() == "left", "previous display wraps deterministically");
+            reject([&] { live.request(4, "missing"); }, "unknown display selection rejected");
+            live.request(3);
+            require(live.status().find("\"mode\":\"all\"") != std::string::npos, "all command restores OS layout");
+            auto bytes = [](const std::string& value) { return std::vector<uint8_t>(value.begin(), value.end()); };
+            require(mapping_capability(bytes("{\"platform\":\"android\", \"mappingControl\" : 1}")), "mapping extension opt-in");
+            require(!mapping_capability(bytes("{\"nested\":{\"mappingControl\":1}}")) &&
+                    !mapping_capability(bytes("{\"mappingControl\":10}")) &&
+                    !mapping_capability(bytes("{\"mappingControl\":\"1\"}")), "mapping capability must be top-level version one");
+            require(!mapping_capability(bytes("{\"mappingControl\":1}junk")) &&
+                    !mapping_capability(bytes("{\"mappingControl\":1,\"mappingControl\":0}")) &&
+                    !mapping_capability(bytes("{\"mappingControl\":1,\"bad\":01}")) &&
+                    !mapping_capability(bytes("{\"mappingCo\\ntrol\":1}")),
+                    "entire capability JSON is validated without duplicate or escaped-key confusion");
+            require(mapping_capability(bytes("{\"mapping\\u0043ontrol\":1,\"other\":[true,null,{\"x\":-1.5e2}]}")),
+                    "valid nested unknown JSON fields and escaped capability keys are accepted");
+            std::vector<uint8_t> request{0,0,0,0,0,0,0,1,1};
+            require(decode_mapping_request(request, 0).action == 1, "decode mapping request");
+            reject([&] { decode_mapping_request(request, 1); }, "reject replayed mapping switch");
+            request.push_back('x');
+            reject([&] { decode_mapping_request(request, 0); }, "reject unexpected request payload");
+            request[8] = 4;
+            require(decode_mapping_request(request, 0).display == "x", "decode selected display identifier");
+            request[9] = 0xff;
+            reject([&] { decode_mapping_request(request, 0); }, "reject invalid UTF8 display identifier");
+        }
+        set_config(config, "mapping.target", "display:main");
+        set_config(config, "mapping.show_cursor", "false");
+        require(config_values(config, false).at("mapping.target") == "display:main" && !config.show_cursor,
+                "display target and native cursor policy round-trip");
+        reject([&] { set_config(config, "mapping.show_cursor", "yes"); }, "reject invalid cursor policy");
+        require(config.stabilization.adaptive_noise, "old configurations default to adaptive noise estimation");
+        set_config(config, "stabilization.adaptive_noise", "false");
+        require(!config.stabilization.adaptive_noise && config_values(config, false).at("stabilization.adaptive_noise") == "false",
+                "adaptive noise can be disabled independently of smoothing");
+        reject([&] { set_config(config, "stabilization.adaptive_noise", "yes"); }, "reject invalid adaptive noise policy");
+        require(!config.stabilization.independent_axes, "direction-specific smoothing is opt-in");
+        set_config(config, "stabilization.independent_axes", "true");
+        require(config.stabilization.independent_axes && config_values(config,false).at("stabilization.independent_axes")=="true",
+                "independent correction budgets persist separately from adaptive noise");
+        reject([&] { set_config(config, "stabilization.independent_axes", "yes"); }, "reject invalid independent-axis policy");
         set_config(config, "mapping.target", "-1920,0,1920,1080");
         require(!config.target_virtual_desktop && config.mapping.target.x == -1920, "parse target");
         reject([&] { set_config(config, "port", "65536"); }, "reject port overflow");

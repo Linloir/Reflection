@@ -1,120 +1,114 @@
 # 笔输入防抖与校准
 
-Reflection 的 Android 客户端默认启用自适应坐标防抖，不校准也可以使用。
-它在笔样本进入传输队列前运行，因此对 USB、Wi-Fi、蓝牙，以及 macOS、
-Windows 宿主都使用同一套处理。本地预览与传输使用相同的处理后坐标。
-压力、倾斜、工具、按钮和样本时间戳不受影响。
+防抖和噪声校准由 **Windows / macOS 电脑端**管理。Android 发送原始坐标，
+电脑在映射和系统注入前处理；平板不再有防抖和校准开关。
+新版客户端声明 `hostStabilization:1`，宿主据此启用平滑。旧客户端没有该声明时，
+宿主跳过平滑，避免与旧版 Android 防抖叠加；异常跳点保护仍然工作。
 
-防抖用于减轻悬停和书写时的小幅位置噪声。抖动可能来自数字化器、驱动、
-握笔动作或它们的组合；看到光标抖动并不能单独证明硬件精度不足。
-算法不能完美区分两段观测值完全相同的“噪声”和“刻意细微运动”。
-需要完全保留原始坐标时，可以随时关闭。
+## 使用方式
 
-## 开关
+打开桌面 Reflection 的 **Pen stability** 区域，可以开关平滑、调整强度，
+在高级设置中调整截止频率、速度响应、噪声尺度和突跳阈值。
+普通设置保存后重启宿主生效。校准成功后噪声参数立即生效并保存，无需重启。
+关闭平滑会保留原始有效运动，异常坐标和接触生命周期保护独立保留。
 
-平板界面的 **Reduce pen jitter** 控制防抖，设置会保存在设备上。
-仓库根目录也可以执行：
+Windows CLI 示例：
 
-```sh
-python3 reflection android stabilization
-python3 reflection android stabilization-off
-python3 reflection android stabilization-on
+```powershell
+python reflection server config set stabilization.enabled true
+python reflection server config set stabilization.adaptive_noise true
+python reflection server config set stabilization.strength 0.5
+python reflection server config set stabilization.min_cutoff_hz 3
+python reflection server config set stabilization.beta 80
+python reflection server status
 ```
 
-关闭时逐样本原样通过，没有隐藏的第二层平滑。开关立即生效，不需要重启宿主。
-建议在笔抬起后切换，便于比较同一笔刷和同一映射下的效果。
-`android status` 中的 `stabilization` 对象提供设置、噪声参数和校准状态。
+macOS 使用 `stabilization.adaptiveNoise`、`stabilization.independentAxes`、`stabilization.minCutoffHz`、`stabilization.derivativeCutoffHz`、
+`stabilization.maxJump`；其他键与 Windows 一致。原有 Android 防抖和校准
+修改命令会提示改用电脑端，不能再启用客户端第二层平滑。
 
-Android 子项目的独立脚本提供等价入口：
+| 参数 | 默认值 | 范围 | 调整效果 |
+| --- | --- | --- | --- |
+| enabled | true | true / false | 开关坐标平滑 |
+| adaptive_noise | true | true / false | 在线分别估计 X/Y 噪声，关闭后使用固定校准值 |
+| independent_axes | false | true / false | 实验性横竖笔画增强稳定；可能改变细曲线和斜线 |
+| strength | 0.5 | 0–1 | 越高越稳，细微动作的跟随更柔和 |
+| min_cutoff_hz | 3 | 0.1–60 Hz | 越低，慢速/静止平滑越强 |
+| beta | 80 | 0–1000 | 越高，快速运动越早减轻平滑 |
+| derivative_cutoff_hz | 12 | 0.1–120 Hz | 速度估计响应速度 |
+| noise | 0.0006 | 0.00001–0.02 | 原始归一化坐标的噪声尺度，通常由校准估计 |
+| max_jump | 0.25 | 0.05–1 | 突然大幅坐标变化的保护阈值 |
+
+这些是工程默认值，不代表任何设备的物理精度。默认无需校准即可使用。
+**Adapt to changing pen noise** 开关控制在线估计。校准 noise 是保守下限；在线估计可以
+临时增大平滑修正幅度，不能覆盖保存的校准值。界面显示当前轴向尺度及有效窗口点数。
+详细实测、统计假设和不能滤除的情况见 [Note2 稳定性研究](stability-study.md)。
+高级参数中的 **Steady horizontal and vertical strokes** 使用独立的横纵修正预算，
+减小快速竖笔时的横向毛刺，低通速度响应仍共享。该选项默认关闭，存在方向偏好，
+不能保证所有笔画更准确；建议同时对照圆圈、斜线和尖角，再决定是否保存。
+多屏映射会放大相同的归一化坐标噪声，比较开关时应保持同一映射、笔刷和缩放。
+
+## 校准
+
+1. 连接新版平板客户端，在电脑点击 **Start calibration**。
+2. 用平常握姿，在平板输入区同一位置轻触约 2–3 秒。允许轻微手漂，勿刻意画线。
+3. 电脑显示采样进度，达到要求后点击 **Finish and apply**，再抬笔重新书写。
 
 ```sh
-client/android/scripts/reflection-android stabilization off
-client/android/scripts/reflection-android stabilization on
-client/android/scripts/reflection-android stabilization status
+python3 reflection server calibration start --json
+python3 reflection server calibration status --json
+python3 reflection server calibration finish --json
+# 放弃本次采集
+python3 reflection server calibration cancel --json
 ```
 
-## 可选校准
+最低需要一笔连续接触中的 120 个样本和 1.2 秒。采集上限为 10 秒/4096 个样本。
+界面显示采样数、时间、进度及具体原因。样本不足时可以继续采集；失败和取消都
+保留先前噪声值。恢复默认可使用桌面 **Restore smoothing defaults**，或将 noise
+设回 0.0006，保存后重启。
 
-校准估计当前输入区域中，笔尖静止时两个方向的噪声幅度。它不是压感校准、
-屏幕对齐或延迟测量，也不会提高数字化器的物理分辨率。
+校准在短时间窗口中去除缓慢线性漂移，再用中位数绝对偏差估计噪声；
+少量异常点不会让整次测量作废。明显主动运动、有效样本不足、断线等情况仍须重试。
+校准不是屏幕对齐、压感标定或延迟测量，也不能提高数字化器的空间分辨率。
 
-1. 打开平板输入界面，保持即将使用的方向和布局。
-2. 点击 **Calibrate**，或运行 `android calibration-start`。
-3. 在书写区中央重新落笔，用平常的握姿轻触并保持静止约 2–3 秒，再抬笔。
-   不要画线、摇动笔尖或反复落笔来凑样本数。
-4. 点击 **Finish**，或运行 `android calibration-finish`。
+采集期间宿主释放系统接触并暂停注入，因此不会在电脑当前文档中留下校准笔迹。
+结束、取消或断线后，旧笔画不会接续；需要新的落笔才恢复接触输入。
+校准结果保存在电脑宿主配置中，不自动区分不同实体笔或平板；更换设备后可重新校准。
 
-最低要求为一次连续接触中的 120 个有效样本及 1 秒采样时间。
-实际需要多久取决于设备如何交付静止输入。界面状态和 JSON 会显示计数；
-如果设备静止时很少发送样本，可继续使用默认防抖，无需勉强校准。
+## 稳定性设计
 
-```sh
-python3 reflection android calibration-start
-# 在平板书写区完成一次静止接触
-python3 reflection android status
-python3 reflection android calibration-finish
-```
+- Android 按设备和 pointer ID 跟踪一支接触中的笔，拒绝混入的悬浮/其他指针事件，
+  冻结单笔归一化几何；非有限坐标不会被转换成屏幕边缘。
+- 宿主在平滑之前检查连续性。无法信任的落笔大跳会在最后安全位置取消当前接触，
+  屏蔽残余移动，等待新的落笔，避免异常点在远处点击。
+- 平滑采用速度自适应低通：采样时间决定步长，X/Y 共用速度响应，限制位置修正量，
+  不等待未来样本、不外推轨迹。快速转向时减轻平滑，减少拖尾。
+- Windows 抬笔保持最后成功注入的接触坐标；注入时序错误单独诊断，不把失败当作
+  成功接触继续处理。虚拟桌面坐标仍在最终 API 边界转换，支持负坐标的多屏布局。
 
-校准过程中，先前的宿主笔接触会被释放。采集轨迹仅在平板显示标记，不发送给
-电脑，不会在当前文档留下校准涂画。完成或取消后，悬停恢复；新的笔画需要重新
-落笔，避免把校准期间的移动接到原来的笔画上。
+平滑无法完美区分观测值相同的噪声和有意微动，可能减弱非常缓慢的细节。
+突跳保护可能中断极端快速或长时间停顿后的笔画；界面的保护计数帮助识别原因。
+一次异常会优先结束当前笔画，不能据此宣称从此没有任何断笔或硬件故障。
 
-| 操作 | CLI | 效果 |
-| --- | --- | --- |
-| 重新校准 | `android calibration-start`，随后 `android calibration-finish` | 新结果通过质量检查并保存后，才替换旧结果 |
-| 取消本次采集 | `android calibration-cancel` | 丢弃未完成采集，保留已有校准 |
-| 删除校准 | `android calibration-reset` | 删除已有数据并取消采集，恢复默认噪声参数；保留防抖开关 |
-
-校准会拒绝样本不足、时间不足、明显移动、持续漂移、多次接触和输入异常。
-失败时保留旧校准；可以继续当前静止接触以补足样本，或取消后重新开始。
-校准开启时不能运行合成 `selftest`，以免把测试数据混入实际测量。
-
-校准数据保存在 Android 应用私有配置中，只有噪声估计、采样统计和输入区域
-尺寸/旋转信息，不保存整段笔迹。区域尺寸或旋转变化时，旧结果失效并回到默认
-参数；布局尚未完成的零尺寸不会删除已有数据。更换笔、握姿或设备使用方式后，
-也可以主动重新校准。当前配置属于该客户端设备，尚不按不同实体笔保存多套档案。
-
-独立脚本对应 `calibration start`、`calibration finish`、
-`calibration cancel`、`calibration reset`。
-
-## 算法与取舍
-
-实现使用 One Euro 的速度自适应低通思路，并加上二维一致性、静止置信度和
-修正距离限制。它是独立的纯 Java 核心，不依赖界面、网络或宿主平台。
-
-- 按采集时间戳计算间隔，历史批次逐点处理，不以网络到达时间替代采样时间。
-- X/Y 共用一个速度自适应截止频率，避免不同轴的平滑强度扭曲转向。
-- 平常将修正限制在估计噪声椭圆的 0.75 倍以内。连续至少 100ms 的轨迹
-  呈现低相关、低漂移、小幅噪声特征时，允许扩大到最多 2.5 倍。
-- 没有锁住光标的硬死区，也不预测或插入轨迹。所有输入样本仍然输出。
-- 落笔、抬笔和取消原样保留；工具切换、接触/悬停切换、异常时间和长间隔
-  重置滤波状态，避免旧轨迹拖拽新笔画的起点。
-- 校准使用两个轴的中位数绝对偏差估计噪声，并检查局部变化及分段中心漂移，
-  防止把明显的主动移动当成噪声。
-
-未校准时，两个轴的噪声尺度各取输入区域长度的 0.0006。这是保守工程初值，
-不是所有设备的测量值，也不是论文建议的通用参数。它约对应 1000 单位轴长上
-的 0.6 单位，最终屏幕上的修正量还取决于宿主的映射与裁剪。
-
-算法不等待未来样本或另设发送缓冲，但平滑本身仍然可能带来相位滞后。
-尤其在幅度接近噪声、速度很慢的刻意摆动中，部分细节会被减弱；噪声范围之外
-的快速动作更受距离上限保护。它也不会强行删除所有离群点，否则可能抹去真实
-的突然转向。
+设计参考 [One Euro Filter 作者项目与论文](https://gery.casiez.net/1euro/) 的速度自适应思路，
+以及 [OpenTabletDriver 反抖插件](https://github.com/Kuuuube/Kuuube-s-CHATTER-EXTERMINATOR)
+对屏幕/平板坐标空间和强度的区分。系统注入时序参考
+[Microsoft 输入注入文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-injecttouchinput)。
+预测可能产生纠正伪影，参见 [Microsoft 的笔迹延迟设计](https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/WebInkEnhancement/explainer.md)；
+这里选择有界平滑和连续性保护，而不提前预测新的落笔位置。
 
 ## 验证
 
-`client/android/scripts/test-core.sh` 包含固定随机种子的静止噪声、不同采样率、
-小幅正弦/圆形、快速 W、直角转向、静止后起笔、边界与校准质量检查。
+原生核心测试覆盖静止噪声、运动误差、异常跳点、接触边界及校准。
+`tools/check_stability.py` 在真实宿主的 dry-run 模式验证协议能力、旧客户端兼容、
+校准进度/失败/保存/断线，以及压力模式持久化，不向桌面注入测试点击。
+Windows 桌面测试还验证不等间距压力控制点的单调性、平台段与数值边界。
 
-默认参数的合成独立轴噪声测试中，不规则 60/120/240Hz 下的静止 RMS 分别约为
-原始值的 54%/42%/35%。这些是可重复的合成结果，不是实机性能保证。相同测试也
-检查刻意小幅运动保留程度，避免只优化静止指标。
+默认参数的确定性 100 Hz 合成测试中，二维静止 RMS 从 0.000820109 降至
+0.000362412（降低约 55.8%）。速度为每秒 0.03 / 0.6 个归一化单位的直线，
+最大位置偏差分别为 0.000884194 / 0.000392825；除以对应速度得到约
+29.47 ms / 0.655 ms 的等效运动滞后。这不是网络或设备端到端延迟。
 
-实际比较时，保持同一应用、笔刷、缩放与映射，分别测试静止悬停、轻压直线、
-很小的慢速波浪、快速书写和突然转向。可先比较开关，再决定是否校准。
-不要把传输 RTT 当作滤波滞后或笔尖到墨迹的完整延迟。
-
-参考：
-
-- [One Euro Filter 作者项目与论文](https://gery.casiez.net/1euro/)
-- [Casiez、Roussel、Vogel：A Simple Speed-based Low-pass Filter for Noisy Input in Interactive Systems](https://inria.hal.science/hal-00670496)
+合成数据只能说明指定轨迹与参数下的滤波行为，不能代替实机书写或完整笔尖到墨迹
+延迟测量。实机应比较慢速小字、快速 W、圆圈、长直线、轻压/抬笔、双屏边界，
+并观察系统注入错误、断线和保护计数。macOS 修改仍需在 Mac 上构建与实际绘画应用验收。

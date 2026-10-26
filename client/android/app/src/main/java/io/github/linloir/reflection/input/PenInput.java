@@ -13,6 +13,8 @@ public final class PenInput {
     private long sequence;
     private PenSample last;
     private int activePointer = -1;
+    private int activeDevice = Integer.MIN_VALUE, activeTool;
+    private int strokeWidth, strokeHeight, strokeRotation;
     private boolean touching;
     private int tiltDeviceId = Integer.MIN_VALUE;
     private static volatile long invalidTiltSamples;
@@ -23,6 +25,11 @@ public final class PenInput {
     private static volatile int lastRawToolType, lastRawButtons, lastDeviceId, lastDeviceVendor, lastDeviceProduct, lastSource;
     private static volatile String lastDeviceName = "", tiltStatus = "unavailable";
     private static volatile boolean tiltReliable;
+    private static volatile long ignoredForeignEvents, ignoredHoverDuringContact, invalidCoordinateSamples, staleSamples;
+    public static long ignoredForeignEvents() { return ignoredForeignEvents; }
+    public static long ignoredHoverDuringContact() { return ignoredHoverDuringContact; }
+    public static long invalidCoordinateSamples() { return invalidCoordinateSamples; }
+    public static long staleSamples() { return staleSamples; }
     public static long invalidTiltSamples() { return invalidTiltSamples; }
     public static long suppressedTiltSamples() { return suppressedTiltSamples; }
     public static long recoveredTiltSamples() { return recoveredTiltSamples; }
@@ -62,47 +69,80 @@ public final class PenInput {
     public boolean onEvent(MotionEvent event, int width, int height, int displayRotation) {
         int action = event.getActionMasked();
         int index = event.getActionIndex();
-        if (action == MotionEvent.ACTION_CANCEL) { cancel(); return true; }
-        if (activePointer >= 0) {
+        if (touching && event.getDeviceId() != activeDevice) { ignoredForeignEvents++; return false; }
+        if (action == MotionEvent.ACTION_CANCEL) {
+            if (touching && !containsPen(event)) { ignoredForeignEvents++; return false; }
+            cancel(); return true;
+        }
+        boolean hover = action == MotionEvent.ACTION_HOVER_ENTER || action == MotionEvent.ACTION_HOVER_MOVE
+            || action == MotionEvent.ACTION_HOVER_EXIT;
+        // Hover is a separate Android stream. Late hover-exit after DOWN must not release the stroke.
+        if (touching && hover) { ignoredHoverDuringContact++; return true; }
+        if (width <= 1 || height <= 1 || displayRotation < 0 || displayRotation > 3) { cancel(); return false; }
+        boolean down = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN;
+        if (down && !penTool(event.getToolType(index))) { ignoredForeignEvents++; return false; }
+        if (touching && action == MotionEvent.ACTION_DOWN) {
+            // A new gesture without a preceding UP releases the old pointer before starting another.
+            if (last != null && event.getEventTime() * 1000000L <= last.timeNanos) return true;
+            cancel();
+        }
+        if (touching) {
             int activeIndex = event.findPointerIndex(activePointer);
-            if (activeIndex < 0) { cancel(); return false; }
             if ((action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP)
                 && event.getPointerId(index) != activePointer) return true;
+            if (activeIndex < 0) {
+                // Finger-only events can belong to a separate touch stream on the same digitizer.
+                if (containsPen(event)) cancel(); else ignoredForeignEvents++;
+                return false;
+            }
+            if (!penTool(event.getToolType(activeIndex))) { ignoredForeignEvents++; return false; }
+            if (event.getToolType(activeIndex) != activeTool || displayRotation != strokeRotation) {
+                cancel(); return true;
+            }
             index = activeIndex;
-        } else {
+        } else if (!down) {
+            // Touch MOVE/UP without a captured DOWN is a cancelled stroke's tail, never hover.
+            if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP
+                || action == MotionEvent.ACTION_POINTER_UP) return false;
             boolean found = false;
             for (int i = 0; i < event.getPointerCount(); i++) {
                 int tool = event.getToolType(i);
-                if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER) {
+                if (penTool(tool)) {
                     index = i; found = true; break;
                 }
             }
             if (!found) return false;
         }
         int tool = event.getToolType(index);
-        if (tool != MotionEvent.TOOL_TYPE_STYLUS && tool != MotionEvent.TOOL_TYPE_ERASER) return false;
+        if (!penTool(tool)) return false;
         if (event.getDeviceId() != tiltDeviceId) {
             resetTiltDetection(); tiltDeviceId = event.getDeviceId();
         }
         int phase;
         switch (action) {
             case MotionEvent.ACTION_DOWN: case MotionEvent.ACTION_POINTER_DOWN:
-                touching = true; activePointer = event.getPointerId(index); phase = PenSample.DOWN; break;
+                if (touching) return true;
+                touching = true; activePointer = event.getPointerId(index); activeDevice = event.getDeviceId(); activeTool = tool;
+                strokeWidth = width; strokeHeight = height; strokeRotation = displayRotation;
+                phase = PenSample.DOWN; break;
             case MotionEvent.ACTION_UP: case MotionEvent.ACTION_POINTER_UP:
-                touching = false; phase = PenSample.UP; break;
+                phase = PenSample.UP; break;
             case MotionEvent.ACTION_HOVER_ENTER: case MotionEvent.ACTION_HOVER_MOVE:
                 phase = PenSample.HOVER; break;
-            case MotionEvent.ACTION_HOVER_EXIT: touching = false; phase = PenSample.LEAVE; break;
-            case MotionEvent.ACTION_MOVE: phase = touching ? PenSample.MOVE : PenSample.HOVER; break;
+            case MotionEvent.ACTION_HOVER_EXIT: phase = PenSample.LEAVE; break;
+            case MotionEvent.ACTION_MOVE: phase = PenSample.MOVE; break;
             case MotionEvent.ACTION_BUTTON_PRESS: case MotionEvent.ACTION_BUTTON_RELEASE:
                 phase = touching ? PenSample.MOVE : PenSample.HOVER; break;
             default: return true;
         }
+        // Keep a single normalization geometry for the entire contact, including batched history and UP.
+        int sampleWidth = touching ? strokeWidth : width, sampleHeight = touching ? strokeHeight : height;
+        int sampleRotation = touching ? strokeRotation : displayRotation;
         if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
-            for (int h = 0; h < event.getHistorySize(); h++) emit(event, index, h, width, height, phase, displayRotation);
+            for (int h = 0; h < event.getHistorySize(); h++) emit(event, index, h, sampleWidth, sampleHeight, phase, sampleRotation);
         }
-        emit(event, index, -1, width, height, phase, displayRotation);
-        if (phase == PenSample.UP || phase == PenSample.LEAVE) activePointer = -1;
+        emit(event, index, -1, sampleWidth, sampleHeight, phase, sampleRotation);
+        if (phase == PenSample.UP || phase == PenSample.LEAVE) releaseContact();
         return true;
     }
 
@@ -115,6 +155,19 @@ public final class PenInput {
         InputDevice.MotionRange distanceRange = range(d, MotionEvent.AXIS_DISTANCE, source);
         float x = history < 0 ? e.getX(i) : e.getHistoricalX(i, history);
         float y = history < 0 ? e.getY(i) : e.getHistoricalY(i, history);
+        long millis = history < 0 ? e.getEventTime() : e.getHistoricalEventTime(history);
+        if (!finite(x) || !finite(y) || millis < 0 || millis > Long.MAX_VALUE / 1000000L) {
+            invalidCoordinateSamples++;
+            if (phase == PenSample.UP || phase == PenSample.LEAVE) cancel();
+            else if (phase == PenSample.DOWN) releaseContact();
+            return;
+        }
+        if (last != null && millis * 1000000L < last.timeNanos) {
+            staleSamples++;
+            if (phase == PenSample.UP || phase == PenSample.LEAVE) cancel();
+            else if (phase == PenSample.DOWN) releaseContact();
+            return;
+        }
         float pressure = normalized(axis(e, MotionEvent.AXIS_PRESSURE, i, history), pressureRange);
         float tilt = axis(e, MotionEvent.AXIS_TILT, i, history);
         float orientation = axis(e, MotionEvent.AXIS_ORIENTATION, i, history);
@@ -128,7 +181,6 @@ public final class PenInput {
         boolean hasTilt = tiltRange != null && orientationRange != null;
         boolean validTilt = finite(tilt) && finite(orientation) && tilt >= 0 && tilt <= Math.PI / 2 + 0.000001
             && orientation >= -Math.PI - 0.000001 && orientation <= Math.PI + 0.000001;
-        long millis = history < 0 ? e.getEventTime() : e.getHistoricalEventTime(history);
         // This firmware packs one signed centidegree value into the two raw tilt bytes.
         boolean knownPackedDevice = "onyx_emp_Wacom I2C Digitizer".equals(lastDeviceName)
             && lastDeviceVendor == 11551 && lastDeviceProduct == 116;
@@ -164,7 +216,14 @@ public final class PenInput {
         if (last != null && last.phase != PenSample.CANCEL && last.phase != PenSample.LEAVE) {
             last = last.cancelled(++sequence); sink.accept(last);
         }
-        touching = false; activePointer = -1;
+        releaseContact();
+    }
+
+    private void releaseContact() { touching = false; activePointer = -1; activeDevice = Integer.MIN_VALUE; }
+    private static boolean penTool(int tool) { return tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER; }
+    private static boolean containsPen(MotionEvent event) {
+        for (int i = 0; i < event.getPointerCount(); i++) if (penTool(event.getToolType(i))) return true;
+        return false;
     }
 
     private void updateTiltDiagnostics() {

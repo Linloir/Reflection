@@ -20,9 +20,7 @@ public final class InkView extends View {
     private Bitmap bitmap;
     private Canvas ink;
     private float lastX, lastY;
-    private float calibrationX, calibrationY;
     private boolean stroke;
-    private boolean calibrationMarker, displayedCalibration;
     private int clearGeneration;
     private long tiltRevision = -1;
 
@@ -30,20 +28,7 @@ public final class InkView extends View {
         super(context); this.controller = controller;
         paint.setStrokeCap(Paint.Cap.ROUND); setBackgroundColor(Color.WHITE);
         input = new PenInput(sample -> {
-            PenSample filtered = controller.accept(sample);
-            if (controller.calibrating()) {
-                stroke = false;
-                calibrationX = sample.x * Math.max(1, getWidth() - 1);
-                calibrationY = sample.y * Math.max(1, getHeight() - 1);
-                calibrationMarker = sample.phase != PenSample.CANCEL && sample.phase != PenSample.LEAVE;
-                invalidate();
-            } else if (filtered != null) {
-                calibrationMarker = false;
-                drawSample(filtered);
-            } else {
-                stroke = false;
-                calibrationMarker = false;
-            }
+            drawSample(controller.accept(sample));
         });
         setFocusable(true);
     }
@@ -74,17 +59,7 @@ public final class InkView extends View {
     }
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (controller.calibrating()) {
-            paint.setColor(Color.DKGRAY); paint.setTextSize(18 * getResources().getDisplayMetrics().scaledDensity);
-            canvas.drawText("Hold the pen tip still, then select Finish.", 24, 40, paint);
-            paint.setTextSize(14 * getResources().getDisplayMetrics().scaledDensity);
-            canvas.drawText("Calibration stays on this tablet.", 24, 68, paint);
-            if (calibrationMarker) {
-                paint.setColor(Color.BLACK); paint.setStrokeWidth(2);
-                canvas.drawLine(calibrationX - 10, calibrationY, calibrationX + 10, calibrationY, paint);
-                canvas.drawLine(calibrationX, calibrationY - 10, calibrationX, calibrationY + 10, paint);
-            }
-        } else if (bitmap != null && controller.preview()) canvas.drawBitmap(bitmap, 0, 0, null);
+        if (bitmap != null && controller.preview()) canvas.drawBitmap(bitmap, 0, 0, null);
         else if (!controller.preview()) {
             paint.setColor(Color.LTGRAY); paint.setTextSize(24 * getResources().getDisplayMetrics().scaledDensity);
             canvas.drawText("Pen input area", 24, 48, paint);
@@ -106,9 +81,6 @@ public final class InkView extends View {
     public void refreshSettings() {
         updateGeometry();
         refreshTiltSettings();
-        if (displayedCalibration != controller.calibrating()) {
-            displayedCalibration = controller.calibrating(); calibrationMarker = false; stroke = false; invalidate();
-        }
         if (clearGeneration != controller.clearGeneration()) {
             clearGeneration = controller.clearGeneration(); if (ink != null) ink.drawColor(Color.WHITE); invalidate();
         }
@@ -122,7 +94,7 @@ public final class InkView extends View {
     }
     public void updateGeometry() {
         if (getDisplay() != null && controller.setInputGeometry(getWidth(), getHeight(), getDisplay().getRotation())) {
-            input.cancel(); stroke = false; calibrationMarker = false;
+            input.cancel(); stroke = false;
         }
     }
     public void cancelInput() { input.cancel(); stroke = false; }

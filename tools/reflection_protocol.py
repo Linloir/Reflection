@@ -146,6 +146,7 @@ class PenSample:
 
 class Client:
     def __init__(self, host: str, port: int, key: bytes, timeout: float = 5.0):
+        self._last_ping = 0
         self.stream = socket.create_connection((host, port), timeout=timeout)
         self.stream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         try:
@@ -167,7 +168,10 @@ class Client:
 
     def ping(self) -> float:
         started = time.monotonic_ns()
-        payload = struct.pack(">Q", started)
+        # A monotonic clock may return the same tick for two rapid calls.
+        # Heartbeat values are replay-protected, so keep their sequence strict.
+        self._last_ping = max(started, self._last_ping + 1)
+        payload = struct.pack(">Q", self._last_ping)
         self.stream.sendall(encode_frame(0x11, payload, self.session_key))
         kind, response = receive_frame(self.stream, self.session_key)
         if kind != 0x12 or response != payload:

@@ -1,5 +1,6 @@
 #pragma once
 #include "reflection/config.hpp"
+#include "reflection/display_mapping.hpp"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -28,6 +29,11 @@ public:
     void event(const std::string& kind, unsigned port, uint64_t samples);
     static std::string status(const std::filesystem::path& path);
     static bool stop(const std::filesystem::path& path);
+    std::shared_ptr<DisplayMapping> display_mapping() const;
+    std::shared_ptr<HostInput> input() const;
+    static std::string calibration_request(const std::filesystem::path& path, unsigned action);
+    static std::string mapping_request(const std::filesystem::path& path, unsigned action,
+                                       const std::string& display = "");
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

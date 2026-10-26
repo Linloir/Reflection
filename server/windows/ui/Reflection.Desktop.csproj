@@ -24,4 +24,19 @@
     <Content Include="$(ReflectionHostPath)" Link="reflection-host.exe"
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <!-- Unpackaged MRT Core builds copy generated XAML to bin but do not add it
+       to dotnet publish. These resources are required by ms-appx URIs at startup. -->
+  <Target Name="PublishCompiledXamlResources" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <_ReflectionXamlResource Include="$(TargetDir)**\*.xbf" />
+      <ResolvedFileToPublish Include="@(_ReflectionXamlResource)">
+        <RelativePath>%(_ReflectionXamlResource.RecursiveDir)%(_ReflectionXamlResource.Filename)%(_ReflectionXamlResource.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(TargetDir)$(TargetName).pri" Condition="Exists('$(TargetDir)$(TargetName).pri')">
+        <RelativePath>$(TargetName).pri</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>

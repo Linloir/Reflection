@@ -3,9 +3,8 @@ package io.github.linloir.reflection.control;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.view.InputDevice;
-import io.github.linloir.reflection.core.CalibrationProfile;
 import io.github.linloir.reflection.core.PenSample;
-import io.github.linloir.reflection.core.PenStabilizer;
+import io.github.linloir.reflection.core.MappingState;
 import io.github.linloir.reflection.core.Wire;
 import io.github.linloir.reflection.input.PenInput;
 import io.github.linloir.reflection.transport.PenTransport;
@@ -32,13 +31,7 @@ public final class Controller {
     private final Context context;
     private volatile PenTransport transport;
     private volatile PenSample latest;
-    private PenSample latestRaw, lastSent;
-    private final PenStabilizer stabilizer = new PenStabilizer();
-    private final CalibrationProfile calibrationProfile = new CalibrationProfile();
-    private PenStabilizer.Calibrator calibrator;
     private int surfaceWidth, surfaceHeight, surfaceRotation;
-    private boolean waitForDown;
-    private String calibrationResult = "not-calibrated";
     private long received;
     private int clearGeneration;
     private volatile long configurationRevision;
@@ -47,19 +40,6 @@ public final class Controller {
     private Controller(Context context) {
         this.context = context;
         prefs = context.getSharedPreferences("reflection", Context.MODE_PRIVATE);
-        stabilizer.setEnabled(prefs.getBoolean("stabilization", true));
-        String stored = prefs.getString("stabilizationCalibration", null);
-        if (stored != null) {
-            try {
-                JSONObject value = new JSONObject(stored);
-                calibrationProfile.replace(new PenStabilizer.Calibration((float) value.getDouble("noiseX"),
-                    (float) value.getDouble("noiseY"), value.getInt("sampleCount"), value.getLong("durationNanos"),
-                    value.getInt("width"), value.getInt("height"), value.getInt("rotation")));
-                calibrationResult = "awaiting-input-surface";
-            } catch (JSONException | IllegalArgumentException e) {
-                calibrationResult = "invalid-saved-calibration";
-            }
-        }
     }
     public long configurationRevision() { return configurationRevision; }
     public String mode() { return prefs.getString("mode", "tcp"); }
@@ -83,94 +63,24 @@ public final class Controller {
     }
     public synchronized void resetTiltDetection() { tiltRevision++; }
 
-    public synchronized boolean stabilizationEnabled() { return stabilizer.enabled(); }
-    public synchronized boolean calibrating() { return calibrator != null; }
-    public synchronized void setStabilization(boolean enabled) {
-        if (!prefs.edit().putBoolean("stabilization", enabled).commit())
-            throw new IllegalStateException("Could not save stabilization setting");
-        stabilizer.setEnabled(enabled);
+    // Legacy commands remain explicit, but the tablet never filters or consumes calibration strokes.
+    public boolean stabilizationEnabled() { return false; }
+    public boolean calibrating() { return false; }
+    public void setStabilization(boolean enabled) {
+        if (enabled) throw hostManaged();
     }
-
+    public void startCalibration() { throw hostManaged(); }
+    public void finishCalibration() { throw hostManaged(); }
+    public void cancelCalibration() {}
+    public void resetCalibration() { throw hostManaged(); }
+    private static IllegalStateException hostManaged() {
+        return new IllegalStateException("Pen stabilization and calibration are managed in the desktop host");
+    }
     public synchronized boolean setInputGeometry(int width, int height, int rotation) {
         if (width < 0 || height < 0 || rotation < 0 || rotation > 3) return false;
         if (surfaceWidth == width && surfaceHeight == height && surfaceRotation == rotation) return false;
-        if (surfaceWidth > 0 && surfaceHeight > 0) {
-            releaseTransportInput();
-            waitForDown = true;
-        }
-        if (calibrator != null) {
-            calibrator = null;
-            calibrationResult = "input-surface-changed";
-            waitForDown = true;
-        }
         surfaceWidth = width; surfaceHeight = height; surfaceRotation = rotation;
-        boolean invalidated = calibrationProfile.updateGeometry(width, height, rotation);
-        stabilizer.setCalibration(calibrationProfile.active());
-        if (invalidated) {
-            prefs.edit().remove("stabilizationCalibration").apply();
-            calibrationResult = "input-surface-changed";
-        } else if (!calibrationProfile.ready()) {
-            calibrationResult = "awaiting-input-surface";
-        } else if (calibrationProfile.active() != null) {
-            calibrationResult = "ok";
-        }
         return true;
-    }
-
-    public synchronized void startCalibration() {
-        if (calibrator != null) throw new IllegalStateException("Calibration is already active");
-        if (!calibrationProfile.ready()) throw new IllegalStateException("Input surface is not ready");
-        PenStabilizer.Calibrator next = new PenStabilizer.Calibrator(surfaceWidth, surfaceHeight, surfaceRotation);
-        releaseTransportInput();
-        stabilizer.reset();
-        waitForDown = true;
-        calibrator = next;
-        calibrationResult = "collecting";
-    }
-
-    public synchronized void finishCalibration() {
-        if (calibrator == null) throw new IllegalStateException("No calibration is active");
-        PenStabilizer.CalibrationResult result = calibrator.finish();
-        if (!result.accepted) {
-            calibrationResult = result.reason;
-            throw new IllegalStateException("Calibration rejected: " + result.reason + " ("
-                + result.sampleCount + " samples, " + result.durationNanos / 1000000L + " ms)");
-        }
-        final String serialized;
-        try { serialized = calibrationJSON(result.calibration).toString(); }
-        catch (JSONException e) { throw new IllegalStateException("Could not encode calibration", e); }
-        if (!prefs.edit().putString("stabilizationCalibration", serialized).commit())
-            throw new IllegalStateException("Could not save calibration; the previous profile is unchanged");
-        calibrationProfile.replace(result.calibration);
-        stabilizer.setCalibration(calibrationProfile.active());
-        calibrator = null;
-        calibrationResult = "ok";
-        waitForDown = true;
-    }
-
-    public synchronized void cancelCalibration() {
-        if (calibrator == null) return;
-        calibrator = null;
-        stabilizer.reset();
-        calibrationResult = "cancelled";
-        waitForDown = true;
-    }
-
-    public synchronized void resetCalibration() {
-        if (!prefs.edit().remove("stabilizationCalibration").commit())
-            throw new IllegalStateException("Could not reset calibration");
-        if (calibrator != null) waitForDown = true;
-        calibrator = null;
-        calibrationProfile.replace(null);
-        stabilizer.setCalibration(null);
-        calibrationResult = "reset-to-defaults";
-    }
-
-    private void releaseTransportInput() {
-        PenTransport current = transport;
-        if (current != null && lastSent != null && lastSent.phase != PenSample.CANCEL && lastSent.phase != PenSample.LEAVE)
-            current.submit(lastSent.cancelled(lastSent.sequence));
-        lastSent = null;
     }
 
     public synchronized void configure(String host, int port, String token, Boolean preview) {
@@ -206,36 +116,42 @@ public final class Controller {
     public synchronized void disconnect() {
         PenTransport current = transport; transport = null;
         if (current != null) current.stop();
-        lastSent = null;
-        stabilizer.reset();
     }
-    /** Returns exactly the sample used for preview and transmission, or null while calibration owns input. */
+    /** Raw normalized capture is shared unchanged by local preview and the host transport. */
     public synchronized PenSample accept(PenSample sample) {
-        latestRaw = sample; received++;
-        if (calibrator != null) {
-            calibrator.add(sample);
-            return null;
-        }
-        if (waitForDown) {
-            if (sample.phase == PenSample.MOVE || sample.phase == PenSample.UP) return null;
-            if (sample.phase == PenSample.DOWN) {
-                waitForDown = false;
-                stabilizer.reset();
-            }
-        }
-        PenSample filtered = stabilizer.apply(sample);
-        latest = filtered;
+        received++; latest = sample;
         PenTransport current = transport;
-        if (current != null) { current.submit(filtered); lastSent = filtered; }
-        return filtered;
+        if (current != null) current.submit(sample);
+        return sample;
     }
     public PenSample latest() { return latest; }
+    public MappingState mapping() {
+        PenTransport current = transport;
+        return current == null ? null : current.mapping();
+    }
+    public synchronized void requestMapping(String action, String display) {
+        PenTransport current = transport;
+        if (current == null) throw new IllegalStateException("Connect to a host before switching screens");
+        final int code;
+        switch (action) {
+            case "query": code = MappingState.QUERY; break;
+            case "next": code = MappingState.NEXT; break;
+            case "previous": code = MappingState.PREVIOUS; break;
+            case "all": code = MappingState.ALL; break;
+            case "select": code = MappingState.SELECT; break;
+            default: throw new IllegalArgumentException("Mapping action must be query, next, previous, all or select");
+        }
+        current.requestMapping(code, display);
+    }
+    public JSONObject mappingStatus() throws JSONException {
+        MappingState value = mapping();
+        return value == null ? new JSONObject().put("supported", false)
+            : new JSONObject(value.json()).put("supported", true);
+    }
     public synchronized String statusLine() {
         PenTransport t = transport;
         return (t == null ? "Disconnected" : t.status()) + " | samples " + received + " | sent " + (t == null ? 0 : t.sent())
-            + " | RTT " + (t == null ? 0 : t.rttMicros() / 1000.0) + " ms"
-            + (calibrator == null ? "" : " | Calibration: " + calibrator.sampleCount() + " samples, "
-                + calibrator.durationNanos() / 1000000L + " ms");
+            + " | RTT " + (t == null ? 0 : t.rttMicros() / 1000.0) + " ms";
     }
     public synchronized JSONObject status() throws JSONException {
         PenTransport t = transport;
@@ -254,34 +170,24 @@ public final class Controller {
             .put("lastRawToolType", PenInput.lastRawToolType()).put("lastRawButtons", PenInput.lastRawButtons())
             .put("inputDevice", new JSONObject().put("id", PenInput.lastDeviceId()).put("name", PenInput.lastDeviceName())
                 .put("vendorId", PenInput.lastDeviceVendor()).put("productId", PenInput.lastDeviceProduct()).put("source", PenInput.lastSource()))
-            .put("stabilization", stabilizationStatus());
+            .put("stabilization", stabilizationStatus()).put("mapping", mappingStatus())
+            .put("rawCoordinates", true).put("hostStabilization", true)
+            .put("inputDiagnostics", new JSONObject().put("ignoredForeignEvents", PenInput.ignoredForeignEvents())
+                .put("ignoredHoverDuringContact", PenInput.ignoredHoverDuringContact())
+                .put("invalidCoordinateSamples", PenInput.invalidCoordinateSamples()).put("staleSamples", PenInput.staleSamples()));
         PenSample p = latest;
         if (p != null) o.put("lastSample", new JSONObject().put("x", p.x).put("y", p.y).put("pressure", p.pressure)
             .put("tiltX", p.tiltX).put("tiltY", p.tiltY).put("tool", p.tool).put("phase", p.phase).put("capabilities", p.capabilities));
         return o;
     }
     private JSONObject stabilizationStatus() throws JSONException {
-        PenStabilizer.Calibration active = stabilizer.calibration();
-        JSONObject state = new JSONObject().put("enabled", stabilizer.enabled())
-            .put("calibrated", active != null)
-            .put("noiseX", active == null ? PenStabilizer.DEFAULT_NOISE : active.noiseX)
-            .put("noiseY", active == null ? PenStabilizer.DEFAULT_NOISE : active.noiseY)
+        JSONObject state = new JSONObject().put("enabled", false).put("calibrated", false)
+            .put("managedBy", "host").put("rawCoordinates", true)
             .put("geometry", new JSONObject().put("width", surfaceWidth).put("height", surfaceHeight)
-                .put("rotation", surfaceRotation).put("ready", calibrationProfile.ready()))
-            .put("calibration", new JSONObject().put("active", calibrator != null)
-                .put("samples", calibrator == null ? 0 : calibrator.sampleCount())
-                .put("durationMillis", calibrator == null ? 0 : calibrator.durationNanos() / 1000000L)
-                .put("minimumSamples", PenStabilizer.MIN_CALIBRATION_SAMPLES)
-                .put("minimumDurationMillis", PenStabilizer.MIN_CALIBRATION_NANOS / 1000000L)
-                .put("lastResult", calibrationResult).put("waitingForDown", waitForDown));
-        if (calibrationProfile.saved() != null) state.put("profile", calibrationJSON(calibrationProfile.saved()));
-        if (latestRaw != null) state.put("lastRawPosition", new JSONObject().put("x", safeFloat(latestRaw.x)).put("y", safeFloat(latestRaw.y)));
+                .put("rotation", surfaceRotation).put("ready", surfaceWidth > 1 && surfaceHeight > 1))
+            .put("calibration", new JSONObject().put("active", false).put("lastResult", "host-managed"));
+        if (latest != null) state.put("lastRawPosition", new JSONObject().put("x", safeFloat(latest.x)).put("y", safeFloat(latest.y)));
         return state;
-    }
-    private static JSONObject calibrationJSON(PenStabilizer.Calibration value) throws JSONException {
-        return new JSONObject().put("noiseX", value.noiseX).put("noiseY", value.noiseY)
-            .put("sampleCount", value.sampleCount).put("durationNanos", value.durationNanos)
-            .put("width", value.width).put("height", value.height).put("rotation", value.rotation);
     }
     private static Object safeFloat(float value) {
         return Float.isNaN(value) || Float.isInfinite(value) ? JSONObject.NULL : value;

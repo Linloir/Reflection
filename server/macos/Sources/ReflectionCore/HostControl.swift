@@ -10,9 +10,18 @@ public final class HostControl {
     private var source: DispatchSourceRead?
     private let queue = DispatchQueue(label: "org.reflection.control", qos: .utility)
     private let onStop: () -> Void
+    private let mappingCommand: ((String) throws -> Data)?
+    private let calibrationCommand: ((String) throws -> Data)?
+    private let statusCommand: (() throws -> Data)?
 
-    public init(configurationURL: URL, onStop: @escaping () -> Void) throws {
+    public init(configurationURL: URL, mappingCommand: ((String) throws -> Data)? = nil,
+                calibrationCommand: ((String) throws -> Data)? = nil,
+                statusCommand: (() throws -> Data)? = nil,
+                onStop: @escaping () -> Void) throws {
         self.onStop = onStop
+        self.mappingCommand = mappingCommand
+        self.calibrationCommand = calibrationCommand
+        self.statusCommand = statusCommand
         path = try Self.socketPath(configurationURL, createDirectory: true)
         lockDescriptor = open(path + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW, mode_t(0o600))
         guard lockDescriptor >= 0 else { throw Self.systemError() }
@@ -62,6 +71,36 @@ public final class HostControl {
         }
     }
 
+    public static func requestMapping(_ command: String, configurationURL: URL) throws -> Data {
+        guard command.utf8.count <= 160, !command.contains(where: { $0.isNewline || $0 == "\0" }) else {
+            throw ReflectionError.invalid("Invalid mapping command")
+        }
+        let response = try request("mapping " + command, configurationURL: configurationURL)
+        let data = Data(response.utf8)
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? String { throw ReflectionError.invalid(error) }
+        _ = try JSONDecoder().decode(MappingStatus.self, from: data)
+        return data
+    }
+
+    public static func requestCalibration(_ command: String, configurationURL: URL) throws -> Data {
+        guard ["start", "finish", "cancel", "status"].contains(command) else {
+            throw ReflectionError.invalid("Invalid calibration command")
+        }
+        let response = try request("calibration " + command, configurationURL: configurationURL)
+        let data = Data(response.utf8)
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? String { throw ReflectionError.invalid(error) }
+        _ = try JSONDecoder().decode(CalibrationStatus.self, from: data)
+        return data
+    }
+
+    public static func requestStatus(configurationURL: URL) throws -> Data {
+        let data = Data(try request("status", configurationURL: configurationURL).utf8)
+        _ = try JSONDecoder().decode(ServerStatus.self, from: data)
+        return data
+    }
+
     private func receive() {
         let client = accept(listener, nil, nil)
         guard client >= 0 else { return }
@@ -69,13 +108,34 @@ public final class HostControl {
         var uid: uid_t = 0, gid: gid_t = 0
         guard getpeereid(client, &uid, &gid) == 0, uid == getuid() else { return }
         Self.configure(client)
-        guard let command = try? Self.readLine(client) else { return }
+        guard let command = try? Self.readLine(client, limit: 192) else { return }
         switch command {
         case "ping\n": try? Self.writeLine("running\n", client)
         case "stop\n":
             try? Self.writeLine("stopping\n", client)
             DispatchQueue.main.async(execute: onStop)
-        default: try? Self.writeLine("error\n", client)
+        case "status\n":
+            if let data = try? statusCommand?(), data.count <= 8190 {
+                try? Self.writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
+            } else { try? Self.writeLine("error\n", client) }
+        default:
+            let handler: ((String) throws -> Data)?
+            let prefix: Int
+            if command.hasPrefix("mapping ") { handler = mappingCommand; prefix = 8 }
+            else if command.hasPrefix("calibration ") { handler = calibrationCommand; prefix = 12 }
+            else { handler = nil; prefix = 0 }
+            guard let handler else {
+                try? Self.writeLine("error\n", client); return
+            }
+            do {
+                let data = try handler(String(command.dropFirst(prefix).dropLast()))
+                guard data.count <= 8190 else { throw ReflectionError.invalid("Mapping response is too large") }
+                try Self.writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
+            } catch {
+                if let data = try? JSONSerialization.data(withJSONObject: ["error": String(describing: error)]) {
+                    try? Self.writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
+                }
+            }
         }
     }
 
@@ -104,10 +164,10 @@ public final class HostControl {
         setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
     }
 
-    private static func readLine(_ descriptor: Int32) throws -> String {
+    private static func readLine(_ descriptor: Int32, limit: Int = 8192) throws -> String {
         var result = [UInt8]()
         // Bounded local messages; byte reads also handle fragmented stream delivery.
-        while result.count < 32 {
+        while result.count < limit {
             var byte: UInt8 = 0
             let count = recv(descriptor, &byte, 1, 0)
             if count < 0 && errno == EINTR { continue }

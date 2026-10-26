@@ -18,6 +18,10 @@ Usage: reflection [--config PATH] COMMAND [OPTIONS]
   profiles show|load|delete NAME   Inspect, activate or delete a profile
   pair                            Show the pairing token (sensitive; do not share logs)
   displays                        List display IDs and desktop coordinates as JSON
+  mapping status|next|previous|all Live display mapping without reconnecting the tablet
+  mapping select ID               Lock mapping to a display UUID (or current display number)
+  calibration start|finish|cancel|status
+                                  Calibrate host smoothing; input is suspended during sampling
   doctor                          Report permissions, backend capabilities and config health
   status                          Show status and verify the live host control channel
   stop                            Gracefully stop the host using this configuration
@@ -48,7 +52,7 @@ func encodedObject<T: Encodable>(_ value: T) throws -> Any {
 func setNested(_ root: inout [String: Any], path: ArraySlice<String>, value: Any) throws {
     guard let key = path.first else { throw ReflectionError.invalid("Empty config key") }
     if path.count == 1 {
-        guard root[key] != nil || ["target", "displayID"].contains(key) else {
+        guard root[key] != nil || ["target", "displayID", "displayUUID"].contains(key) else {
             throw ReflectionError.invalid("Unknown config key: \(key)")
         }
         if value is NSNull { root.removeValue(forKey: key) }
@@ -147,6 +151,18 @@ func main() throws {
         try printJSON(["protocol": 1, "port": config.port, "token": config.token])
     case "displays":
         try printJSON(encodedObject(availableDisplays()))
+    case "mapping":
+        guard args.count == 2 || (args.count == 3 && args[1] == "select") else {
+            throw ReflectionError.invalid("mapping requires status, next, previous, all, or select ID")
+        }
+        let data = try HostControl.requestMapping(args.dropFirst().joined(separator: " "), configurationURL: configURL)
+        try printJSON(JSONSerialization.jsonObject(with: data))
+    case "calibration":
+        guard args.count == 2 || (args.count == 3 && args[2] == "--json") else {
+            throw ReflectionError.invalid("calibration requires start, finish, cancel, or status [--json]")
+        }
+        let data = try HostControl.requestCalibration(args[1], configurationURL: configURL)
+        try printJSON(JSONSerialization.jsonObject(with: data))
     case "doctor":
         var result: [String: Any] = [
             "platform": "macOS",
@@ -173,12 +189,16 @@ func main() throws {
         try printJSON(result)
     case "status":
         var object: [String: Any] = ["state": "stopped", "snapshot": false]
-        if let data = try? Data(contentsOf: statusURL),
+        let live = try? HostControl.requestStatus(configurationURL: configURL)
+        if let live, let current = try JSONSerialization.jsonObject(with: live) as? [String: Any] {
+            object = current
+            object["snapshot"] = false
+        } else if let data = try? Data(contentsOf: statusURL),
            let saved = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
             object = saved
             object["snapshot"] = true
         }
-        let running = HostControl.isRunning(configurationURL: configURL)
+        let running = live != nil || HostControl.isRunning(configurationURL: configURL)
         object["processAlive"] = running
         object["controlAvailable"] = running
         try printJSON(object)
@@ -189,29 +209,24 @@ func main() throws {
         let allowed = Set(["start", "--dry-run", "--verbose", "--bluetooth", "--tablet-point-events"])
         guard args.allSatisfy(allowed.contains) else { throw ReflectionError.invalid("Unknown start option") }
         var shutdown: (() -> Void)?
-        let control = try HostControl(configurationURL: configURL) { shutdown?() }
         let config = try ServerConfiguration.load(from: configURL)
         let displays = try availableDisplays()
-        let target: Region
-        if let custom = config.mapping.target { target = custom }
-        else if let id = config.mapping.displayID {
-            guard let display = displays.first(where: { $0.id == id }) else {
-                throw ReflectionError.invalid("Configured display is not active")
-            }
-            target = display.bounds
-        } else {
-            guard let display = displays.first(where: \.main) else {
-                throw ReflectionError.invalid("No main display available")
-            }
-            target = display.bounds
-        }
+        let selected = config.mapping.displayUUID
+            ?? displays.first(where: { $0.id == config.mapping.displayID })?.stableID
+            ?? config.mapping.displayID.map { String($0) }
+        let mapping = try ScreenMappingState(displays: mappingDisplays(displays), selected: selected,
+                                            custom: config.mapping.target)
         let dryRun = args.contains("--dry-run")
         let backend: TabletBackend = dryRun ? RecordingBackend()
             : try QuartzTabletBackend(emitTabletPointEvents: args.contains("--tablet-point-events"))
-        let mapper = CoordinateMapper(configuration: config.mapping, target: target,
+        let mapper = CoordinateMapper(configuration: config.mapping, target: mapping.target,
             initialCursor: CGEvent(source: nil)?.location)
         let server = try TabletServer(configuration: config, backend: backend, mapper: mapper,
-            dryRun: dryRun, statusURL: statusURL, verbose: args.contains("--verbose"))
+            dryRun: dryRun, statusURL: statusURL, verbose: args.contains("--verbose"), configurationURL: configURL)
+        let control = try HostControl(configurationURL: configURL,
+            mappingCommand: { try server.mappingCommand($0) },
+            calibrationCommand: { try server.calibrationCommand($0) },
+            statusCommand: { try server.liveStatus() }) { shutdown?() }
         try server.start { error in
             fputs("reflection: \(error)\n", stderr)
             exit(1)

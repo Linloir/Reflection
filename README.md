@@ -22,8 +22,8 @@ macOS 使用 Quartz，Windows 使用 Windows Ink / Synthetic Pointer。
 | iPad | 规划中的原生客户端；见 [iOS 接口规划](client/ios/README.md) |
 | 笔数据 | 坐标、压感、倾斜、悬停、橡皮擦、侧键；依赖设备与目标应用 |
 | 映射 | 绝对 / 相对模式、源区域、目标区域、旋转、输出坐标级数；macOS 另有自动等比映射 |
-| 笔设置 | Gamma / 控制点压力曲线、倾斜开关与比例、多套 profile；UI/CLI 均可操作 |
-| 防抖 | Android 默认启用自适应坐标平滑；可关闭、校准、重新校准与删除校准 |
+| 笔设置 | Gamma / 折线控制点 / 平滑压力曲线、倾斜开关与比例、多套 profile；UI/CLI 均可操作 |
+| 防抖 | 电脑端自适应坐标平滑、异常跳点保护；桌面 UI 管理开关、强度、参数与噪声校准 |
 | USB | ADB reverse，通过 USB 传输同一笔协议，需要 USB 调试授权 |
 | Wi-Fi | TCP，双向认证、逐帧校验、低延迟发送 |
 | 蓝牙 | 原生 Bluetooth Classic RFCOMM，三端代码已实现；尚待蓝牙实机互通验证 |
@@ -151,6 +151,7 @@ python3 reflection test
 
 - [连接方式](docs/connectivity.md)：USB、Wi-Fi、蓝牙和排障。
 - [配置与 CLI](docs/configuration.md)：映射、配对、自动化和权限。
+- [多屏映射与切换](docs/mapping.md)：全部屏幕、单屏、快捷键、平板联动和 Windows 笔位置提示。
 - [笔设置与排障](docs/pen-settings.md)：压感曲线、profiles、分辨率含义、倾斜与橡皮擦。
 - [笔输入防抖与校准](docs/stabilization.md)：默认防抖、细节保留、可选校准与控制命令。
 - [兼容性与验证范围](docs/compatibility.md)：设备轴、宿主精度、应用边界。

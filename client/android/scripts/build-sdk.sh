@@ -27,6 +27,7 @@ find "$output_dir/classes" -type f -name '*.class' -delete
 python3 - "$project_dir/app/src/main/AndroidManifest.xml" "$output_dir/AndroidManifest.xml" <<'PYMANIFEST'
 import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text().replace('<manifest ', '<manifest package="io.github.linloir.reflection" ', 1)
+text=text.replace('${reflectionAppLabel}', 'Reflection')
 pathlib.Path(sys.argv[2]).write_text(text)
 PYMANIFEST
 "$build_tools/aapt2" compile --dir "$project_dir/app/src/main/res" -o "$output_dir/resources.zip"

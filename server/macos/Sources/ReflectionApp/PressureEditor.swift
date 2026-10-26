@@ -5,6 +5,7 @@ struct PressureEditor: View {
     @Binding var mapping: MappingConfiguration
     let livePressure: Double
     let hasLiveSample: Bool
+    @SwiftUI.State private var selectedPoint: Int?
 
     private var points: [PressurePoint] {
         if !mapping.pressureCurve.isEmpty { return mapping.pressureCurve }
@@ -25,13 +26,19 @@ struct PressureEditor: View {
                 }
                 .fixedSize()
             }
-            Picker("Curve type", selection: Binding(
-                get: { !mapping.pressureCurve.isEmpty },
-                set: { custom in
-                    mapping.pressureCurve = custom ? points : []
+            Picker("Curve type", selection: Binding<String>(
+                get: { mapping.pressureCurve.isEmpty ? "gamma" : mapping.pressureInterpolation },
+                set: { mode in
+                    selectedPoint = nil
+                    if mode == "gamma" { mapping.pressureCurve = [] }
+                    else {
+                        if mapping.pressureCurve.isEmpty { mapping.pressureCurve = points }
+                        mapping.pressureInterpolation = mode
+                    }
                 })) {
-                    Text("Gamma").tag(false)
-                    Text("Custom points").tag(true)
+                    Text("Gamma").tag("gamma")
+                    Text("Straight segments").tag("linear")
+                    Text("Smooth curve").tag("smooth")
                 }
                 .pickerStyle(.segmented)
 
@@ -45,7 +52,9 @@ struct PressureEditor: View {
                 Text("Below 1 reaches stronger pressure sooner. Above 1 needs a firmer touch.")
                     .font(.caption).foregroundColor(.secondary)
             } else {
-                Text("Drag the points or enter precise values. Outputs increase smoothly along each segment.")
+                Text(mapping.pressureInterpolation == "smooth"
+                     ? "Click to add a point; drag to reshape. The smooth curve stays monotonic without overshoot."
+                     : "Click to add a point; drag to reshape. Straight segments connect the control points.")
                     .font(.caption).foregroundColor(.secondary)
             }
 
@@ -88,6 +97,13 @@ struct PressureEditor: View {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color(nsColor: .textBackgroundColor))
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("pressure-graph"))
+                        .onEnded { value in
+                            guard hypot(value.translation.width, value.translation.height) < 4 else { return }
+                            addPoint(input: (value.location.x - inset) / size.width,
+                                     output: 1 - (value.location.y - inset) / size.height)
+                        })
                 Path { path in
                     for index in 0...4 {
                         let t = CGFloat(index) / 4
@@ -96,11 +112,11 @@ struct PressureEditor: View {
                         path.move(to: CGPoint(x: inset, y: inset + size.height * t))
                         path.addLine(to: CGPoint(x: inset + size.width, y: inset + size.height * t))
                     }
-                }.stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                }.stroke(Color.secondary.opacity(0.15), lineWidth: 1).allowsHitTesting(false)
                 Path { path in
                     path.move(to: CGPoint(x: inset, y: inset + size.height))
                     path.addLine(to: CGPoint(x: inset + size.width, y: inset))
-                }.stroke(Color.secondary.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                }.stroke(Color.secondary.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [4, 4])).allowsHitTesting(false)
                 Path { path in
                     for step in 0...256 {
                         let input = Double(step) / 256
@@ -108,12 +124,12 @@ struct PressureEditor: View {
                                         y: inset + size.height * (1 - safeOutput(input)))
                         if step == 0 { path.move(to: p) } else { path.addLine(to: p) }
                     }
-                }.stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                }.stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round)).allowsHitTesting(false)
 
                 ForEach(Array(points.enumerated()), id: \.offset) { index, point in
                     let isEndpoint = index == 0 || index == points.count - 1
                     Circle()
-                        .fill(Color(nsColor: .textBackgroundColor))
+                        .fill(selectedPoint == index ? Color.accentColor : Color(nsColor: .textBackgroundColor))
                         .overlay(Circle().stroke(Color.accentColor, lineWidth: 2))
                         .frame(width: isEndpoint ? 9 : 14, height: isEndpoint ? 9 : 14)
                         .frame(width: 24, height: 24)
@@ -123,6 +139,7 @@ struct PressureEditor: View {
                         .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("pressure-graph"))
                             .onChanged { drag in
                                 guard !isEndpoint else { return }
+                                selectedPoint = index
                                 updatePoint(index, input: (drag.location.x - inset) / size.width,
                                             output: 1 - (drag.location.y - inset) / size.height)
                             })
@@ -158,7 +175,7 @@ struct PressureEditor: View {
                         .frame(width: 52, alignment: .leading)
                     DecimalField("Input point \(index + 1)", value: pointBinding(index, input: true))
                     DecimalField("Output point \(index + 1)", value: pointBinding(index, input: false))
-                    Button { mapping.pressureCurve.remove(at: index) } label: {
+                    Button { mapping.pressureCurve.remove(at: index); selectedPoint = nil } label: {
                         Image(systemName: "minus.circle")
                     }
                     .buttonStyle(.borderless)
@@ -219,6 +236,19 @@ struct PressureEditor: View {
         var updated = current
         updated.insert(PressurePoint(input: input, output: safeOutput(input)), at: index)
         mapping.pressureCurve = updated
+        selectedPoint = index
+    }
+
+    private func addPoint(input: Double, output: Double) {
+        guard input.isFinite, output.isFinite, input > 0.001, input < 0.999 else { return }
+        var current = points
+        guard current.count < 32,
+              let index = current.firstIndex(where: { $0.input > input }), index > 0,
+              input - current[index - 1].input > 0.001, current[index].input - input > 0.001 else { return }
+        current.insert(PressurePoint(input: input,
+            output: min(current[index].output, max(current[index - 1].output, output))), at: index)
+        mapping.pressureCurve = current
+        selectedPoint = index
     }
 }
 

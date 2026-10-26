@@ -37,6 +37,18 @@ class ControlTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Host is required"):
                 cli.broadcast(["adb"], "configure")
 
+    def test_preview_package_keeps_original_java_component_name(self):
+        preview = cli.PACKAGE + ".preview"
+        self.assertEqual(cli.android_component(preview, "ui.MainActivity"),
+                         preview + "/" + cli.PACKAGE + ".ui.MainActivity")
+        response = subprocess.CompletedProcess([], 0, 'Broadcast completed: result=0, data="{}"\n', "")
+        with patch.object(cli, "run", return_value=response) as run:
+            cli.broadcast(["adb"], "mapping", {"action": "status"}, package=preview)
+            self.assertIn(preview + "/" + cli.PACKAGE + ".control.ControlReceiver",
+                          shlex.split(run.call_args.args[0][-1]))
+        with self.assertRaises(ValueError):
+            cli.android_component("bad;command", "ui.MainActivity")
+
     def test_stabilization_controls_and_calibration_lifecycle(self):
         with patch.object(cli, "adb_prefix", return_value=["adb", "-s", "test"]), \
              patch.object(cli, "broadcast", return_value={}) as broadcast, \
@@ -79,6 +91,23 @@ class ControlTests(unittest.TestCase):
             with patch("sys.stderr"):
                 self.assertEqual(cli.main(["android", "calibration-reset", "auto"]), 1)
             broadcast.assert_not_called()
+
+    def test_screen_controls_preserve_display_ids_and_reject_invalid_arguments(self):
+        with patch.object(cli, "adb_prefix", return_value=["adb", "-s", "test"]), \
+             patch.object(cli, "broadcast", return_value={}) as broadcast, \
+             patch.object(cli, "json_print"):
+            for action in ("status", "next", "previous", "all"):
+                self.assertEqual(cli.main(["android", "mapping", action]), 0)
+                broadcast.assert_called_with(["adb", "-s", "test"], "mapping", {"action": action})
+            display = r"\\.\DISPLAY2"
+            self.assertEqual(cli.main(["android", "mapping", "select", display]), 0)
+            broadcast.assert_called_with(["adb", "-s", "test"], "mapping", {"action": "select", "display": display})
+            for arguments in (["mapping", "select"], ["mapping", "unknown"], ["mapping", "all", "extra"],
+                              ["tilt", "auto", "extra"], ["status", "next"]):
+                broadcast.reset_mock()
+                with patch("sys.stderr"):
+                    self.assertEqual(cli.main(["android"] + arguments), 1)
+                broadcast.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 """Independent wire peer for Java transport tests; no Android device required."""
 import hashlib
 import hmac
+import json
 import pathlib
 import socket
 import struct
@@ -54,10 +55,15 @@ def host(listener):
                     send(stream, pong)
                 else:
                     assert body[1] == 0x20
+                    assert json.loads(body[2:])['hostStabilization'] == 1
             assert [p[0] for p in pens] == list(range(1, 7))
             assert [p[9] for p in pens] == [1, 2, 2, 2, 2, 3]
             assert all(p[10] == 1 and p[11] == 0 for p in pens)
-            assert all(a[1] < b[1] for a, b in zip(pens, pens[1:]))
+            assert [p[1] for p in pens] == [1000000000, 1000000000, 1000000000,
+                                          1001000000, 1002000000, 1002000000]
+            assert all(a[1] <= b[1] for a, b in zip(pens, pens[1:]))
+            assert all(abs(p[2] - i * .1) < 1e-6 and abs(p[3] - .4) < 1e-6
+                       and abs(p[4] - (0 if i == 5 else i * .1)) < 1e-6 for i, p in enumerate(pens))
             send(stream, pong)
             # A replayed authenticated heartbeat must close the current session.
             while stream.recv(4096):

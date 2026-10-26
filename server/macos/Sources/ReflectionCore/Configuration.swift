@@ -25,8 +25,10 @@ public struct MappingConfiguration: Codable, Equatable {
     public var source = Region(x: 0, y: 0, width: 1, height: 1)
     public var target: Region? = nil
     public var displayID: UInt32? = nil
+    public var displayUUID: String? = nil
     public var pressureGamma = 1.0
     public var pressureCurve: [PressurePoint] = []
+    public var pressureInterpolation = "linear"
     public var tiltEnabled = true
     public var tiltScale = 1.0
     public var positionStepsX = 0
@@ -39,7 +41,7 @@ public struct MappingConfiguration: Codable, Equatable {
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case mode, source, target, displayID, pressureGamma, pressureCurve
+        case mode, source, target, displayID, displayUUID, pressureGamma, pressureCurve, pressureInterpolation
         case relativeSensitivity, rotation, preserveAspect, sourceAspect
         case tiltEnabled, tiltScale, positionStepsX, positionStepsY
     }
@@ -51,8 +53,10 @@ public struct MappingConfiguration: Codable, Equatable {
         source = try c.decodeIfPresent(Region.self, forKey: .source) ?? source
         target = try c.decodeIfPresent(Region.self, forKey: .target)
         displayID = try c.decodeIfPresent(UInt32.self, forKey: .displayID)
+        displayUUID = try c.decodeIfPresent(String.self, forKey: .displayUUID)
         pressureGamma = try c.decodeIfPresent(Double.self, forKey: .pressureGamma) ?? pressureGamma
         pressureCurve = try c.decodeIfPresent([PressurePoint].self, forKey: .pressureCurve) ?? pressureCurve
+        pressureInterpolation = try c.decodeIfPresent(String.self, forKey: .pressureInterpolation) ?? pressureInterpolation
         tiltEnabled = try c.decodeIfPresent(Bool.self, forKey: .tiltEnabled) ?? tiltEnabled
         tiltScale = try c.decodeIfPresent(Double.self, forKey: .tiltScale) ?? tiltScale
         positionStepsX = try c.decodeIfPresent(Int.self, forKey: .positionStepsX) ?? positionStepsX
@@ -70,13 +74,55 @@ public struct MappingConfiguration: Codable, Equatable {
             let right = pressureCurve[index], left = pressureCurve[index - 1]
             if input <= right.input {
                 let fraction = (input - left.input) / (right.input - left.input)
+                if pressureInterpolation == "smooth" {
+                    let h = right.input - left.input
+                    let t2 = fraction * fraction, t3 = t2 * fraction
+                    let result = (2 * t3 - 3 * t2 + 1) * left.output
+                        + (t3 - 2 * t2 + fraction) * h * pressureSlope(index - 1)
+                        + (-2 * t3 + 3 * t2) * right.output
+                        + (t3 - t2) * h * pressureSlope(index)
+                    return min(right.output, max(left.output, result))
+                }
                 return left.output + fraction * (right.output - left.output)
             }
         }
         return 1
     }
 
+    /// Shape-preserving cubic Hermite slopes (PCHIP); flat segments never overshoot.
+    private func pressureSlope(_ index: Int) -> Double {
+        let count = pressureCurve.count
+        func secant(_ left: Int) -> Double {
+            let a = pressureCurve[left], b = pressureCurve[left + 1]
+            return (b.output - a.output) / (b.input - a.input)
+        }
+        if count == 2 { return secant(0) }
+        if index == 0 || index == count - 1 {
+            let left = index == 0 ? 0 : count - 2
+            let adjacent = index == 0 ? 1 : count - 3
+            let h0 = pressureCurve[left + 1].input - pressureCurve[left].input
+            let h1 = pressureCurve[adjacent + 1].input - pressureCurve[adjacent].input
+            let d0 = secant(left), d1 = secant(adjacent)
+            return max(0, min(3 * d0, ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1)))
+        }
+        let d0 = secant(index - 1), d1 = secant(index)
+        guard d0 > 0, d1 > 0 else { return 0 }
+        let h0 = pressureCurve[index].input - pressureCurve[index - 1].input
+        let h1 = pressureCurve[index + 1].input - pressureCurve[index].input
+        let w1 = 2 * h1 + h0, w2 = h1 + 2 * h0
+        return (w1 + w2) / (w1 / d0 + w2 / d1)
+    }
+
     public func validate() throws {
+        guard ["linear", "smooth"].contains(pressureInterpolation) else {
+            throw ReflectionError.invalid("mapping.pressureInterpolation must be linear or smooth")
+        }
+        if let displayUUID {
+            guard !displayUUID.isEmpty, displayUUID.utf8.count <= 128,
+                  !displayUUID.contains(where: { $0.isNewline || $0 == "\0" }) else {
+                throw ReflectionError.invalid("mapping.displayUUID must be a display identifier")
+            }
+        }
         guard ["absolute", "relative"].contains(mode) else {
             throw ReflectionError.invalid("mapping.mode must be absolute or relative")
         }
@@ -123,8 +169,20 @@ public struct ServerConfiguration: Codable {
     public var port: UInt16 = 24819
     public var token: String
     public var mapping = MappingConfiguration()
+    public var stabilization = StabilizationConfiguration()
 
     public init(token: String) { self.token = token }
+
+    private enum CodingKeys: String, CodingKey { case version, bind, port, token, mapping, stabilization }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        token = try c.decode(String.self, forKey: .token)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? version
+        bind = try c.decodeIfPresent(String.self, forKey: .bind) ?? bind
+        port = try c.decodeIfPresent(UInt16.self, forKey: .port) ?? port
+        mapping = try c.decodeIfPresent(MappingConfiguration.self, forKey: .mapping) ?? mapping
+        stabilization = try c.decodeIfPresent(StabilizationConfiguration.self, forKey: .stabilization) ?? stabilization
+    }
 
     public func validate() throws {
         guard version == 1 else { throw ReflectionError.invalid("Unsupported config version") }
@@ -133,6 +191,7 @@ public struct ServerConfiguration: Codable {
             throw ReflectionError.invalid("token must contain exactly 64 hexadecimal characters")
         }
         try mapping.validate()
+        try stabilization.validate()
     }
 
     public static func randomToken() throws -> String {
@@ -191,6 +250,7 @@ public enum ReflectionError: Error, CustomStringConvertible {
 
 public struct DisplayDescription: Codable {
     public let id: UInt32
+    public let stableID: String
     public let main: Bool
     public let bounds: Region
     public let pixelWidth: Int
@@ -208,8 +268,16 @@ public func availableDisplays() throws -> [DisplayDescription] {
     }
     return ids.prefix(Int(count)).map {
         let b = CGDisplayBounds($0)
-        return DisplayDescription(id: $0, main: $0 == CGMainDisplayID(),
+        let stableID: String
+        if let uuid = CGDisplayCreateUUIDFromDisplayID($0)?.takeRetainedValue() {
+            stableID = CFUUIDCreateString(kCFAllocatorDefault, uuid) as String
+        } else { stableID = String($0) }
+        return DisplayDescription(id: $0, stableID: stableID, main: $0 == CGMainDisplayID(),
             bounds: Region(x: b.origin.x, y: b.origin.y, width: b.width, height: b.height),
             pixelWidth: CGDisplayPixelsWide($0), pixelHeight: CGDisplayPixelsHigh($0))
     }
+}
+
+public func mappingDisplays(_ displays: [DisplayDescription]) -> [MappingDisplay] {
+    displays.map { MappingDisplay(id: $0.stableID, name: "Display \($0.id)", bounds: $0.bounds, primary: $0.main) }
 }

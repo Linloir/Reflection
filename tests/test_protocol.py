@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 import reflection_protocol as wire
@@ -21,6 +22,19 @@ class ProtocolTests(unittest.TestCase):
     def test_golden_vectors_match_reference(self):
         path = pathlib.Path(__file__).resolve().parents[1] / "protocol" / "vectors.json"
         self.assertEqual(json.loads(path.read_text()), wire.golden_vectors())
+
+    def test_heartbeat_values_increase_when_clock_tick_is_repeated(self):
+        client = wire.Client.__new__(wire.Client)
+        client.session_key = self.key
+        client._last_ping = 0
+        client.stream = mock.Mock()
+        with mock.patch.object(wire.time, "monotonic_ns", return_value=100), \
+             mock.patch.object(wire, "receive_frame", side_effect=[(0x12, struct.pack(">Q", 100)),
+                                                                  (0x12, struct.pack(">Q", 101))]):
+            self.assertEqual(client.ping(), 0)
+            self.assertEqual(client.ping(), 0)
+        bodies = [wire.decode_body(call.args[0][4:], self.key)[1] for call in client.stream.sendall.call_args_list]
+        self.assertEqual([struct.unpack(">Q", body)[0] for body in bodies], [100, 101])
 
     def test_sample_roundtrip_and_exact_wire_size(self):
         decoded = wire.PenSample.decode(self.sample.encode())

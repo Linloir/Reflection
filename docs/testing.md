@@ -1,5 +1,21 @@
 # 测试与验收
 
+## 主机防抖、校准与压力曲线
+
+`tools/check_stability.py --server PATH --platform windows` 在真实宿主的 dry-run
+模式检查原始坐标能力协商、旧客户端避免双重平滑、接触突跳保护、无活动校准时
+finish/cancel 幂等、轻微漂移和离群值校准、失败/断线保留设置及压力模式持久化。
+macOS 使用相同脚本并传 `--platform macos`，已接入两端 CI。
+
+Windows 原生 CTest 包含防抖、校准和 PCHIP 回归；桌面 .NET 检查包含随机不等间距
+控制点的单调性、平台段和非法输入。Android 输入测试覆盖接触期悬浮、设备/pointer
+身份、历史时间、单笔几何变化与非有限坐标。旧客户端滤波单测保留作历史参考，
+新版 Android 运行路径不再调用客户端滤波器。
+
+2026-10-26 Windows 本机完成原生构建、四个 CTest、协议/控制/映射/稳定性集成和
+WinUI 构建；正式 Android APK 已重装、连接。Swift 实际核心源码经过可移植编译运行，
+Mac UI/系统注入仍需 Mac 原生构建和设备验收，不能用 Windows 上的解析测试替代。
+
 ## 可重复的核心检查
 
 ```bash
@@ -15,6 +31,7 @@ python3 reflection test
 ```bash
 python3 tools/check_host.py --server PATH_TO_NATIVE_EXECUTABLE
 python3 tools/check_controls.py --server PATH_TO_NATIVE_EXECUTABLE
+python3 tools/check_mapping.py --server PATH_TO_NATIVE_EXECUTABLE
 ```
 
 脚本创建临时配置与随机密钥，只启动 `--dry-run`，测试互认证、笔阶段、
@@ -25,7 +42,10 @@ python3 tools/check_controls.py --server PATH_TO_NATIVE_EXECUTABLE
 重名/非法名称拒绝、同配置重复启动、协作停止和重启。macOS 还检查通过符号
 链接修改配置后控制身份保持一致。全部使用独立临时配置及无输入模式。
 
-Windows 上这两个脚本自动使用 Windows 配置命令，也可显式传入
+`check_mapping.py` 验证旧客户端兼容、切屏协商、抬笔后切换、电脑到平板的状态推送、
+启动设置保持不变，以及非法、未协商、重放和篡改控制的拒绝。
+
+Windows 上这三个脚本自动使用 Windows 配置命令，也可显式传入
 `--platform windows`。
 
 ## 桌面 UI
@@ -44,11 +64,17 @@ python3 reflection ui
 4. UI 打开时从 CLI 修改同一配置，旧 UI 内容不能静默覆盖外部更改。
 5. 退出 UI 时释放自己启动的宿主；从 CLI 独立启动的宿主继续运行。
 6. macOS 26+ / 旧版、Win11 / Win10 的导航、主题、高对比度、多屏缩放和可访问性。
+7. 全部/单屏切换、快捷键、平板联动、屏幕提示不抢焦点、笔画中切换和断屏回退。
+8. Windows 发布目录包含应用的 `.xbf` 和 `.pri` 资源；从发布目录实际启动界面，
+   检查高 DPI 下默认窗口能显示操作控件。
 
 macOS 27.0.1 已实际验证窗口、曲线拖点、profile 保存、dry-run 启停重启、
 外部配置冲突提示以及关闭窗口后的自有宿主退出。旧版 macOS 目前仅检查
-API availability 分支，不能代替实际机器验收。Windows 的 C# 类型检查和
-C++ 交叉编译不包含 XAML 编译与窗口运行，需在 Windows 构建并完成上述项目。
+API availability 分支，不能代替实际机器验收。Windows 已实际完成原生构建、
+XAML 编译、发布目录启动、双 4K 屏幕布局、快捷切屏/提示和 Android 双向状态同步。
+双屏负坐标布局下的物理笔悬浮反馈和跨屏联合映射已通过人工验收；
+具体绘画软件兼容性、压力效果与其他 DPI 组合仍需各设备验收。
+新增 macOS 多屏路径已做状态机检查和 Swift 语法检查，完整构建与实机验证仍需 macOS。
 
 ## Android 实机诊断
 

@@ -4,6 +4,29 @@ import AppKit
 @testable import ReflectionCore
 
 final class CoreTests: XCTestCase {
+    func testSingleDisplayEdgesStayInsideHalfOpenBounds() {
+        let target = Region(x: -1920, y: -200, width: 1920, height: 1080)
+        for mode in ["absolute", "relative"] {
+            for preserveAspect in [false, true] {
+                for steps in [0, 2, 4096] {
+                    var configuration = MappingConfiguration()
+                    configuration.mode = mode
+                    configuration.preserveAspect = preserveAspect
+                    configuration.sourceAspect = 0.75
+                    configuration.positionStepsX = steps
+                    configuration.positionStepsY = steps
+                    let mapper = CoordinateMapper(configuration: configuration, target: target,
+                        initialCursor: CGPoint(x: target.x + target.width, y: target.y + target.height))
+                    let output = mapper.map(sample(1, 1, phase: .hover)).point
+                    XCTAssertGreaterThanOrEqual(output.x, target.x)
+                    XCTAssertGreaterThanOrEqual(output.y, target.y)
+                    XCTAssertLessThan(output.x, target.x + target.width)
+                    XCTAssertLessThan(output.y, target.y + target.height)
+                }
+            }
+        }
+    }
+
     func sample(_ x: Double, _ y: Double, _ pressure: Double = 0.5, phase: PenPhase = .move) -> PenSample {
         PenSample(sequence: 1, timestampNanoseconds: 1, phase: phase, tool: .pen,
             buttons: 0, x: x, y: y, pressure: pressure, tiltX: 0, tiltY: 0)

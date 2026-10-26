@@ -40,6 +40,7 @@ struct Mapping {
     unsigned rotation = 0;
     double pressure_gamma = 1;
     std::vector<std::pair<double, double>> pressure_curve;
+    std::string pressure_interpolation = "linear";
     unsigned position_steps_x = 0, position_steps_y = 0;
     bool tilt_enabled = true;
     double tilt_scale = 1;
@@ -61,6 +62,7 @@ public:
     void seed(double x, double y);
 private:
     Mapping mapping_;
+    std::vector<double> pressure_slopes_;
     bool tracking_ = false;
     double last_x_ = 0, last_y_ = 0, cursor_x_ = 0, cursor_y_ = 0;
 };
@@ -69,6 +71,7 @@ class InputBackend {
 public:
     virtual ~InputBackend() = default;
     virtual void submit(const MappedSample& sample) = 0;
+    virtual void tick() {}
     virtual void release() noexcept = 0;
 };
 

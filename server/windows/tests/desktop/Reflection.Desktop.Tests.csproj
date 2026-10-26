@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../ui/HostClient.cs" Link="HostClient.cs" />
+    <Compile Include="../../ui/PressureCurve.cs" Link="PressureCurve.cs" />
   </ItemGroup>
 </Project>

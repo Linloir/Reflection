@@ -21,6 +21,8 @@ void Mapping::validate() const {
         throw std::invalid_argument("rotation must be 0, 90, 180 or 270");
     if (!std::isfinite(pressure_gamma) || pressure_gamma < 0.1 || pressure_gamma > 10)
         throw std::invalid_argument("pressure_gamma must be in [0.1,10]");
+    if (pressure_interpolation != "linear" && pressure_interpolation != "smooth")
+        throw std::invalid_argument("pressure_interpolation must be linear or smooth");
     if (!pressure_curve.empty()) {
         if (pressure_curve.size() < 2 || pressure_curve.size() > 32 ||
             pressure_curve.front() != std::make_pair(0.0, 0.0) ||
@@ -45,6 +47,24 @@ void Mapping::validate() const {
 
 Mapper::Mapper(Mapping mapping) : mapping_(mapping) {
     mapping_.validate();
+    const auto& p = mapping_.pressure_curve;
+    if (p.size() >= 2) {
+        const size_t n = p.size();
+        std::vector<double> h(n - 1), d(n - 1);
+        for (size_t i = 0; i + 1 < n; ++i) {
+            h[i] = p[i + 1].first - p[i].first;
+            d[i] = (p[i + 1].second - p[i].second) / h[i];
+        }
+        pressure_slopes_.assign(n, d[0]);
+        if (n > 2) {
+            pressure_slopes_[0] = std::clamp(((2*h[0]+h[1])*d[0]-h[0]*d[1])/(h[0]+h[1]), 0.0, 3*d[0]);
+            pressure_slopes_[n-1] = std::clamp(((2*h[n-2]+h[n-3])*d[n-2]-h[n-2]*d[n-3])/(h[n-2]+h[n-3]), 0.0, 3*d[n-2]);
+            for (size_t i = 1; i + 1 < n; ++i) {
+                const double w1 = 2*h[i]+h[i-1], w2 = h[i]+2*h[i-1];
+                pressure_slopes_[i] = d[i-1] <= 0 || d[i] <= 0 ? 0 : (w1+w2)/(w1/d[i-1]+w2/d[i]);
+            }
+        }
+    }
     seed(mapping_.target.x + (mapping_.target.width - 1) / 2,
          mapping_.target.y + (mapping_.target.height - 1) / 2);
 }
@@ -90,6 +110,13 @@ MappedSample Mapper::map(const Sample& sample) {
             const auto& lower = *(upper - 1);
             pressure = lower.second + (upper->second - lower.second) *
                 (sample.pressure - lower.first) / (upper->first - lower.first);
+            if (mapping_.pressure_interpolation == "smooth") {
+                const auto i = static_cast<size_t>(upper - points.begin() - 1);
+                const double h = upper->first - lower.first, t = (sample.pressure - lower.first) / h;
+                pressure = (2*t*t*t-3*t*t+1)*lower.second + (t*t*t-2*t*t+t)*h*pressure_slopes_[i] +
+                    (-2*t*t*t+3*t*t)*upper->second + (t*t*t-t*t)*h*pressure_slopes_[i+1];
+                pressure = std::clamp(pressure, lower.second, upper->second);
+            }
         }
     }
     auto quantize = [](double value, double origin, double span, unsigned steps) {

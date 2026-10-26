@@ -36,11 +36,14 @@ void nonblocking(SOCKET socket) {
     if (ioctlsocket(socket, FIONBIO, &enabled)) throw socket_error("FIONBIO");
 }
 
-bool ready(SOCKET socket, bool write, Deadline deadline, const std::atomic_bool& running) {
+bool ready(SOCKET socket, bool write, Deadline deadline, const std::atomic_bool& running,
+           const std::function<void()>& tick = {}) {
     while (running.load()) {
+        if(Clock::now()>=deadline) return false;
+        if(tick) tick();
         const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
         if (remaining <= 0) return false;
-        const auto wait = std::min<int64_t>(remaining, 250000);
+        const auto wait = std::min<int64_t>(remaining, tick ? 50000 : 250000);
         timeval timeout{static_cast<long>(wait / 1000000), static_cast<long>(wait % 1000000)};
         fd_set set;
         FD_ZERO(&set);
@@ -53,10 +56,10 @@ bool ready(SOCKET socket, bool write, Deadline deadline, const std::atomic_bool&
 }
 
 void transfer(SOCKET socket, uint8_t* data, size_t size, bool write, Deadline deadline,
-              const std::atomic_bool& running) {
+              const std::atomic_bool& running, const std::function<void()>& tick = {}) {
     size_t offset = 0;
     while (offset < size) {
-        if (!ready(socket, write, deadline, running)) throw std::runtime_error("session timeout or shutdown");
+        if (!ready(socket, write, deadline, running, tick)) throw std::runtime_error("session timeout or shutdown");
         const int count = write ?
             send(socket, reinterpret_cast<const char*>(data + offset), static_cast<int>(size - offset), 0) :
             recv(socket, reinterpret_cast<char*>(data + offset), static_cast<int>(size - offset), 0);
@@ -69,20 +72,22 @@ void transfer(SOCKET socket, uint8_t* data, size_t size, bool write, Deadline de
     }
 }
 
-std::vector<uint8_t> receive(SOCKET socket, Deadline deadline, const std::atomic_bool& running) {
+std::vector<uint8_t> receive(SOCKET socket, Deadline deadline, const std::atomic_bool& running,
+                             const std::function<void()>& tick = {}) {
     uint8_t header[4];
-    transfer(socket, header, sizeof(header), false, deadline, running);
+    transfer(socket, header, sizeof(header), false, deadline, running, tick);
     const auto size = read_u32(header);
     if (size < 2 || size > maximum_body) throw std::runtime_error("invalid frame length");
     std::vector<uint8_t> result(size);
-    transfer(socket, result.data(), result.size(), false, deadline, running);
+    transfer(socket, result.data(), result.size(), false, deadline, running, tick);
     if (result[0] != protocol_version) throw std::runtime_error("unsupported protocol version");
     return result;
 }
 
-void transmit(SOCKET socket, std::vector<uint8_t> body, Deadline deadline, const std::atomic_bool& running) {
+void transmit(SOCKET socket, std::vector<uint8_t> body, Deadline deadline, const std::atomic_bool& running,
+              const std::function<void()>& tick = {}) {
     auto bytes = frame(body);
-    transfer(socket, bytes.data(), bytes.size(), true, deadline, running);
+    transfer(socket, bytes.data(), bytes.size(), true, deadline, running, tick);
 }
 
 std::vector<uint8_t> labelled(const char* label, const std::vector<uint8_t>& nonce) {
@@ -144,36 +149,58 @@ private:
 };
 
 void session(SOCKET socket, const Config& config, bool dry_run, const std::atomic_bool& running,
-             const EventSink& events) {
+             const EventSink& events, DisplayMapping& mapping, HostInput& input) {
     const auto session_key = authenticate(socket, unhex(config.token), running);
-    auto backend = make_pen_backend(dry_run);
+    auto backend = make_pen_backend(dry_run, config.show_cursor);
     struct ReleaseOnExit {
         InputBackend* backend;
-        ~ReleaseOnExit() { backend->release(); }
-    } release{backend.get()};
-    Mapper mapper(config.mapping);
+        DisplayMapping* mapping;
+        HostInput* input;
+        ~ReleaseOnExit() { backend->release(); mapping->release(); input->end_session(); }
+    } release{backend.get(), &mapping, &input};
+    input.begin_session();
     POINT cursor{};
-    if (GetCursorPos(&cursor)) mapper.seed(cursor.x, cursor.y);
+    if (GetCursorPos(&cursor)) mapping.seed(cursor.x, cursor.y);
     SequenceGuard guard;
     ContactGuard contact_guard;
+    const auto tick = [&] {
+        if(input.take_release()) { backend->release(); mapping.release(); contact_guard=ContactGuard{}; }
+        backend->tick();
+    };
     uint64_t count = 0;
     auto last_status = Clock::now();
     bool capabilities_seen = false;
+    bool mapping_enabled = false;
+    uint64_t mapping_sequence = 0, mapping_response = 0, mapping_revision = 0;
+    auto send_mapping = [&] {
+        // Capture before serializing: a simultaneous local switch must remain dirty for the next heartbeat.
+        mapping_revision = mapping.revision();
+        const auto status = mapping.status(++mapping_response);
+        std::vector<uint8_t> message{1, 0x22};
+        message.insert(message.end(), status.begin(), status.end());
+        const auto tag = hmac_sha256(session_key, message);
+        message.insert(message.end(), tag.begin(), tag.end());
+        transmit(socket, std::move(message), Clock::now() + std::chrono::seconds(1), running, tick);
+    };
     if (events) events({"connected", "", 0, 0, dry_run, {}});
     while (running.load()) {
-        auto body = receive(socket, Clock::now() + std::chrono::seconds(2), running);
+        auto body = receive(socket, Clock::now() + std::chrono::seconds(2), running, tick);
         if (body.size() < 34) throw std::runtime_error("missing frame authentication");
         const std::vector<uint8_t> tag(body.end() - 32, body.end());
         body.resize(body.size() - 32);
         if (!same_bytes(tag, hmac_sha256(session_key, body))) throw std::runtime_error("frame authentication failed");
         std::vector<uint8_t> payload(body.begin() + 2, body.end());
         if (body[1] == 0x10) {
-            const auto sample = decode_pen(payload);
-            guard.accept(sample);
-            contact_guard.accept(sample);
-            const auto mapped = mapper.map(sample);
-            backend->submit(mapped);
+            const auto raw = decode_pen(payload);
+            guard.accept(raw);
             ++count;
+            tick();
+            const auto processed = input.process(raw);
+            if(!processed) continue;
+            const auto& sample=*processed;
+            contact_guard.accept(sample);
+            const auto mapped = mapping.map(sample);
+            backend->submit(mapped);
             if (events && Clock::now() - last_status >= std::chrono::milliseconds(500)) {
                 events({"samples", "", count, 0, dry_run, {}});
                 last_status = Clock::now();
@@ -186,10 +213,19 @@ void session(SOCKET socket, const Config& config, bool dry_run, const std::atomi
             body[1] = 0x12;
             const auto response_tag = hmac_sha256(session_key, body);
             body.insert(body.end(), response_tag.begin(), response_tag.end());
-            transmit(socket, std::move(body), Clock::now() + std::chrono::seconds(1), running);
+            transmit(socket, std::move(body), Clock::now() + std::chrono::seconds(1), running, tick);
+            if (mapping_enabled && mapping.revision() != mapping_revision) send_mapping();
         } else if (body[1] == 0x20) {
             if (capabilities_seen || count != 0) throw std::runtime_error("replayed or late capabilities");
             capabilities_seen = true;
+            mapping_enabled = mapping_capability(payload);
+            input.negotiate(stabilization_capability(payload));
+            if (mapping_enabled) send_mapping();
+        } else if (body[1] == 0x21 && mapping_enabled) {
+            const auto request = decode_mapping_request(payload, mapping_sequence);
+            mapping_sequence = request.sequence;
+            mapping.request(request.action, request.display);
+            send_mapping();
         } else {
             throw std::runtime_error("unexpected session message");
         }
@@ -199,10 +235,12 @@ void session(SOCKET socket, const Config& config, bool dry_run, const std::atomi
 
 } // namespace
 
-void serve(const Config& original, bool dry_run, std::atomic_bool& running, const EventSink& events) {
+void serve(const Config& original, bool dry_run, std::atomic_bool& running, const EventSink& events,
+           std::shared_ptr<DisplayMapping> mapping, std::shared_ptr<HostInput> input) {
     original.validate();
     Config config = original;
-    if (config.target_virtual_desktop) config.mapping.target = virtual_desktop();
+    if (!mapping) mapping = std::make_shared<DisplayMapping>(config, displays);
+    if (!input) input = std::make_shared<HostInput>(config.stabilization);
     config.mapping.validate();
     if (!dry_run && !pen_api_available()) throw std::runtime_error("Synthetic Pointer API unavailable");
     Winsock winsock;
@@ -255,7 +293,7 @@ void serve(const Config& original, bool dry_run, std::atomic_bool& running, cons
                                 reinterpret_cast<const char*>(&enabled), sizeof(enabled)))
                     throw socket_error("TCP_NODELAY");
             }
-            session(client.get(), config, dry_run, running, events);
+            session(client.get(), config, dry_run, running, events, *mapping, *input);
         } catch (const std::exception& error) {
             if (events) events({"disconnected", error.what(), 0, 0, dry_run, {}});
         }

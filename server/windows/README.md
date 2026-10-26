@@ -183,6 +183,17 @@ TCP 生效，蓝牙日志的 `port` 是动态 RFCOMM 信道号。
 
 ## 映射和笔配置
 
+桌面界面的 **Screens and mapping** 提供按 Windows 布局排列的屏幕图、
+全部屏幕/单屏实时切换、Ctrl+Alt+PageUp/PageDown/0 快捷键和目标屏幕提示。
+新版 Android 的 **Screens** 面板与宿主双向同步；落笔时切换会等到抬笔生效。
+详见 [多屏映射与切换](../../docs/mapping.md)。
+
+`mapping.target` 现在也接受 `display:DISPLAY_ID`，按当前显示设备解析矩形；
+原有 `desktop` 和自定义矩形保持兼容。运行中的
+`mapping status|next|previous|all|select ID` 控制当前会话，不覆盖启动配置。
+`mapping.show_cursor` 默认为 `true`，启用可见的系统笔反馈；设为 `false`
+后遵循 Windows 自身的笔反馈设置，修改后重启生效。
+
 所有矩形使用 `x,y,width,height`。平板源矩形使用 0..1 的归一化坐标；宿主
 目标矩形使用物理桌面像素，支持左侧显示器的负坐标。`displays` 输出每台
 显示器的准确坐标。目标默认是整个虚拟桌面；这里没有自动保持纵横比，
@@ -205,8 +216,9 @@ reflection-host config apply mapping.pressure_gamma 0.8 mapping.tilt_scale 1.0
 | `port` | TCP 端口 1..65535；默认 `24819` |
 | `token` | 64 个十六进制字符；修改后旧配对密钥失效 |
 | `mapping.mode` | `absolute` / `relative` |
+| `mapping.show_cursor` | `true` 强制显示系统笔反馈；`false` 遵循 Windows 原生设置 |
 | `mapping.source` | 源区域，必须完全位于单位矩形内 |
-| `mapping.target` | `desktop` 或物理像素矩形 |
+| `mapping.target` | `desktop`、`display:DISPLAY_ID` 或物理像素矩形 |
 | `mapping.rotation` | 0、90、180、270；倾斜轴随之旋转 |
 | `mapping.pressure_gamma` | 0.1..10；1 为线性，低于 1 更轻压易出粗线 |
 | `mapping.pressure_curve` | 空字符串使用 Gamma；否则为 `input,output;...` 的单调分段线性曲线 |
@@ -309,6 +321,21 @@ Windows 桌面注入、应用实际压力/橡皮擦行为、不同 DPI/显示器
 蓝牙连接、断线恢复和端到端延迟仍需要 Windows 实机验证。源码或交叉编译
 通过不能替代这些测试。建议先运行 `serve --dry-run` 确认数据，再在支持
 Windows Ink 的绘画程序里测试逐渐加压、悬停、翻转橡皮擦、侧键和拔线。
+
+## 电脑端防抖与压感编辑
+
+桌面 **Pen stability** 管理开关、强度和高级参数，显示突跳保护计数。
+**Start calibration / Finish and apply / Cancel** 控制主机采集；校准期间不注入
+系统输入，成功只保存噪声参数并立即应用。命令为
+`calibration start|finish|cancel|status --json`。旧 Android 客户端继续原有滤波，
+新版原始坐标客户端使用主机滤波，避免叠加。详见 [防抖与校准](../../docs/stabilization.md)。
+
+**Pressure response** 保留 Gamma 和折线，新增 **Smooth curve**：点击加点、
+拖动调整、选中点精确编辑输入/输出百分比。平滑插值单调且无过冲。
+普通参数用 **Save and restart** 应用。
+
+`tools/check_stability.py` 提供真实宿主 dry-run 集成验证；Windows 本机 MSVC
+原生构建、CTest 和 WinUI 加点/拖动验收通过。实际 Inkodo 书写仍须使用物理笔检查。
 
 ## 官方接口资料
 

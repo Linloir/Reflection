@@ -89,6 +89,7 @@ internal static class Program
         Directory.CreateDirectory(temporary);
         try
         {
+            CheckPressureCurves();
             var appHost = Path.Combine(AppContext.BaseDirectory,
                 "Reflection.Desktop.Tests" + (OperatingSystem.IsWindows() ? ".exe" : ""));
             var fakeExecutable = Path.Combine(AppContext.BaseDirectory, "reflection-host.exe");
@@ -128,7 +129,7 @@ internal static class Program
                 await client.StopAsync();
                 Require(!FakeHostAlive(), "explicit stop releases the running child");
             }
-            Console.WriteLine($"{checks} desktop lifecycle checks passed");
+            Console.WriteLine($"{checks} desktop lifecycle and pressure checks passed");
             return 0;
         }
         catch (Exception error)
@@ -145,6 +146,42 @@ internal static class Program
                 child.WaitForExit(2000);
             }
             Directory.Delete(temporary, true);
+        }
+    }
+
+    private static void CheckPressureCurves()
+    {
+        var points = PressureCurve.Parse("0,0;0.25,0.1;0.75,0.9;1,1");
+        foreach (var point in points)
+            Require(Math.Abs(PressureCurve.Evaluate(points, point.X, true) - point.Y) < 1e-12, "smooth curve passes through control points");
+        Require(Math.Abs(PressureCurve.Evaluate(points, .125, false) - .05) < 1e-12, "linear mode retains straight segments");
+        Require(PressureCurve.Evaluate(points, .125, true) < .04, "smooth mode differs from linear at a curved segment");
+        var random = new Random(20261026);
+        for (var trial = 0; trial < 40; ++trial)
+        {
+            var xs = Enumerable.Range(0, 8).Select(_ => random.NextDouble()).Order().ToArray();
+            var ys = Enumerable.Range(0, 8).Select(_ => random.NextDouble()).Order().ToArray();
+            var curve = new List<CurveKnot> { new(0, 0) };
+            curve.AddRange(xs.Select((x, i) => new CurveKnot(x, ys[i])));
+            curve.Add(new(1, 1));
+            var previous = 0.0;
+            var valid = true;
+            for (var i = 0; i <= 1000; ++i)
+            {
+                var y = PressureCurve.Evaluate(curve, i / 1000.0, true);
+                valid &= double.IsFinite(y) && y >= previous - 1e-12 && y >= 0 && y <= 1;
+                previous = y;
+            }
+            Require(valid, "unevenly spaced monotone curves remain monotone and bounded");
+        }
+        var plateau = PressureCurve.Parse("0,0;0.2,0.4;0.8,0.4;1,1");
+        Require(PressureCurve.Evaluate(plateau, .5, true) == .4, "flat pressure interval stays flat");
+        foreach (var invalid in new[] { "0,0;0.5,NaN;1,1", "0,0;0.5,0.7;0.5,0.8;1,1", "0,0;0.2,0.8;0.7,0.3;1,1" })
+        {
+            var rejected = false;
+            try { PressureCurve.Parse(invalid); }
+            catch (FormatException) { rejected = true; }
+            Require(rejected, "invalid or decreasing curve is rejected");
         }
     }
 }

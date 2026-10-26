@@ -3,11 +3,13 @@
 import argparse
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--serial', help='ADB device serial when several devices are attached')
+parser.add_argument('--package', default='io.github.linloir.reflection', help='Installed application ID (for a side-by-side preview build)')
 sub = parser.add_subparsers(dest='command', required=True)
 install = sub.add_parser('install')
 install.add_argument('--apk', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[1] / 'build/sdk/reflection-debug.apk')
@@ -28,20 +30,27 @@ calibration = sub.add_parser('calibration', help='Manage the stationary pen nois
 calibration.add_argument('action', choices=['start', 'finish', 'cancel', 'reset'])
 tilt = sub.add_parser('tilt', help='Configure tilt capture and compatible device recovery')
 tilt.add_argument('mode', choices=['auto', 'standard', 'off', 'status', 'reset'], nargs='?', default='status')
+mapping = sub.add_parser('mapping', help='Inspect or switch the connected host screen mapping')
+mapping.add_argument('action', choices=['status', 'query', 'next', 'previous', 'all', 'select'], nargs='?', default='status')
+mapping.add_argument('display', nargs='?', help='Host display ID, only for select')
 args = parser.parse_args()
+if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+', args.package):
+    parser.error('Invalid application ID')
+if args.command == 'mapping' and ((args.action == 'select') != (args.display is not None)):
+    parser.error('mapping select requires a display ID; other actions do not accept one')
 adb = ['adb'] + (['-s', args.serial] if args.serial else [])
-package = 'io.github.linloir.reflection'
+package = args.package
 if args.command == 'install':
     command = adb + ['install', '-r', str(args.apk)]
 elif args.command == 'open':
-    command = adb + ['shell', 'am', 'start', '-n', package + '/.ui.MainActivity']
+    command = adb + ['shell', 'am', 'start', '-n', package + '/io.github.linloir.reflection.ui.MainActivity']
 elif args.command == 'grant-bluetooth':
     command = adb + ['shell', 'pm', 'grant', package, 'android.permission.BLUETOOTH_CONNECT']
 else:
     action = 'calibration-' + args.action if args.command == 'calibration' else args.command
     if args.command == 'tilt' and args.mode == 'reset':
         action = 'tilt-reset'
-    command = adb + ['shell', 'am', 'broadcast', '-n', package + '/.control.ControlReceiver', '--es', 'command', action]
+    command = adb + ['shell', 'am', 'broadcast', '-n', package + '/io.github.linloir.reflection.control.ControlReceiver', '--es', 'command', action]
     if args.command == 'configure':
         for key in ('host', 'mode', 'bluetooth'):
             value = getattr(args, key)
@@ -64,6 +73,12 @@ else:
         command += ['--ez', 'enabled', str(args.state == 'on').lower()]
     elif args.command == 'tilt' and args.mode not in ('status', 'reset'):
         command += ['--es', 'mode', args.mode]
+    elif args.command == 'mapping':
+        command += ['--es', 'action', args.action]
+        if args.display is not None:
+            command += ['--es', 'display', args.display]
+        # GDI display names contain backslashes; preserve them through Android's shell.
+        command = adb + ['shell', ' '.join(shlex.quote(value) for value in command[len(adb) + 1:])]
 result = subprocess.run(command, capture_output=True, text=True)
 # `am broadcast` echoes extras on some Android releases: scrub the token defensively.
 output = result.stdout + result.stderr

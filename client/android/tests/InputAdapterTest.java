@@ -89,6 +89,7 @@ public final class InputAdapterTest {
             "three consecutive valid samples recover standard tilt without waiting for pen leave");
         check(PenInput.suppressedTiltSamples() == suppressedBefore + 3, "recovered samples are not counted as suppressed");
         check(PenInput.tiltAxes() == 2 && PenInput.tiltInputRotation() == -1, "standard devices report both axes without packed inference");
+        adapter.onEvent(event(MotionEvent.ACTION_UP, 1015, 0, .5f, 0), 1001, 1001);
         adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 1016, 0, Float.NaN, 1), 1001, 1001);
         adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 1020, 0, .5f, 0).withDevice(new InputDevice(2, true)), 1001, 1001);
         check(PenInput.tiltReliable(), "another digitizer does not inherit suppression");
@@ -165,7 +166,8 @@ public final class InputAdapterTest {
         adapter.resetTiltDetection();
         check(PenInput.tiltInputRotation() == -1 && !PenInput.tiltReliable(), "retry clears learned rotation and output capability");
         check(PenInput.recoveredTiltSamples() >= totalRecovered, "retry preserves lifetime diagnostic counters");
-        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_MOVE, packedSample(2224, 150, 200, .7f, 19, 3))
+        adapter.cancel();
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_HOVER_MOVE, packedSample(2224, 150, 200, .7f, 19, 3))
             .withDevice(new InputDevice(8, true, "onyx_emp_Wacom I2C Digitizer", 11551, 117)), 1001, 1001, 0);
         check(!PenInput.tiltStatus().startsWith("packed"), "a different product cannot enter firmware-specific decoding");
     }
@@ -185,9 +187,93 @@ public final class InputAdapterTest {
         check(PenInput.lastRawButtons() == MotionEvent.BUTTON_STYLUS_PRIMARY && PenInput.barrelButtonSamples() == buttonBefore + 1,
             "button diagnostics distinguish raw eraser and barrel switch");
     }
+    private static void contactIgnoresHoverAndForeignDevices() {
+        List<PenSample> samples = new ArrayList<>(); PenInput adapter = new PenInput(samples::add);
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1000, .5f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 1001, 0, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_EXIT, 1002, 0, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1003, .9f, 0, 0).withDevice(new InputDevice(99, true)), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_CANCEL, 1003, 0, 0, 0).withDevice(new InputDevice(99, true)), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1004, 1, 0, 0).withTool(MotionEvent.TOOL_TYPE_FINGER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_CANCEL, 1004, 0, 0, 0).withTool(MotionEvent.TOOL_TYPE_FINGER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1005, .6f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_UP, 1006, 0, 0, 0), 1001, 1001);
+        check(samples.size() == 3 && samples.get(0).phase == PenSample.DOWN && samples.get(1).phase == PenSample.MOVE
+            && samples.get(2).phase == PenSample.UP, "hover and other devices must not interrupt a contact stream");
+        check(samples.get(1).pressure == .6f, "foreign same-ID pointer must not leak pressure or position");
+    }
+    private static MotionEvent pointers(int action, int actionIndex, long millis, boolean penFirst) {
+        MotionEvent.Sample pen = new MotionEvent.Sample(millis, 250, 750, .5f);
+        MotionEvent.Sample finger = new MotionEvent.Sample(millis, 990, 10, 1);
+        return new MotionEvent(action, actionIndex, penFirst ? new int[]{7, 9} : new int[]{9, 7},
+            penFirst ? new int[]{MotionEvent.TOOL_TYPE_STYLUS, MotionEvent.TOOL_TYPE_FINGER}
+                : new int[]{MotionEvent.TOOL_TYPE_FINGER, MotionEvent.TOOL_TYPE_STYLUS},
+            new MotionEvent.Sample[]{penFirst ? pen : finger}, new MotionEvent.Sample[]{penFirst ? finger : pen});
+    }
+    private static void pointerIndicesAndUncapturedTails() {
+        List<PenSample> samples = new ArrayList<>(); PenInput adapter = new PenInput(samples::add);
+        adapter.onEvent(pointers(MotionEvent.ACTION_POINTER_DOWN, 1, 1000, true), 1001, 1001);
+        check(samples.isEmpty(), "a finger pointer-down must not become a pen down");
+        adapter.onEvent(pointers(MotionEvent.ACTION_POINTER_DOWN, 1, 1001, false), 1001, 1001);
+        adapter.onEvent(pointers(MotionEvent.ACTION_MOVE, 0, 1002, true), 1001, 1001);
+        adapter.onEvent(pointers(MotionEvent.ACTION_POINTER_UP, 1, 1003, true), 1001, 1001);
+        adapter.onEvent(pointers(MotionEvent.ACTION_MOVE, 0, 1004, false), 1001, 1001);
+        adapter.onEvent(pointers(MotionEvent.ACTION_POINTER_UP, 1, 1005, false), 1001, 1001);
+        check(samples.size() == 4, "foreign pointer-up is ignored and pen UP is preserved");
+        for (PenSample sample : samples) check(sample.x == .25f && sample.y == .75f, "pointer ID survives index reordering");
+        check(samples.get(0).phase == PenSample.DOWN && samples.get(3).phase == PenSample.UP, "correct pointer owns boundaries");
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1010, .8f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_UP, 1011, 0, 0, 0), 1001, 1001);
+        check(samples.size() == 4, "uncaptured touch MOVE/UP is not converted to hover");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1012, .5f, 0, 0), 1001, 1001); adapter.cancel();
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1013, .8f, 0, 0), 1001, 1001);
+        check(samples.size() == 6 && samples.get(5).phase == PenSample.CANCEL, "cancelled stroke tail cannot move the pointer");
+    }
+    private static void geometryAndInvalidPositions() {
+        List<PenSample> samples = new ArrayList<>(); PenInput adapter = new PenInput(samples::add);
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1000, .5f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1004, .5f, 0, 0), 2001, 2001);
+        adapter.onEvent(event(MotionEvent.ACTION_UP, 1008, 0, 0, 0), 2001, 2001);
+        for (PenSample sample : samples) check(sample.x == .1f && sample.y == .2f, "normalization geometry is frozen until UP");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1012, .5f, 0, 0), 2001, 2001);
+        check(samples.get(3).x == .05f && samples.get(3).y == .1f, "next stroke adopts new geometry");
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_MOVE,
+            new MotionEvent.Sample(1000, 1900, 1900, .5f), new MotionEvent.Sample(1014, Float.NaN, 200, .5f),
+            new MotionEvent.Sample(1016, 100, 200, .6f)), 2001, 2001);
+        check(samples.size() == 5 && samples.get(4).x == .05f, "stale/NaN history cannot create edge jumps");
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_UP, new MotionEvent.Sample(1020, Float.POSITIVE_INFINITY, 200, 0)), 2001, 2001);
+        check(samples.size() == 6 && samples.get(5).phase == PenSample.CANCEL && samples.get(5).x == .05f,
+            "invalid UP releases at last valid position");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1024, .5f, 0, 0), 1, 1);
+        check(samples.size() == 6, "unlaid-out surface cannot map to desktop corners");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1028, .5f, 0, 0), 1001, 1001, 0);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1032, .5f, 0, 0), 1001, 1001, 1);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1036, .5f, 0, 0), 1001, 1001, 1);
+        check(samples.size() == 8 && samples.get(7).phase == PenSample.CANCEL, "rotation cancels once and suppresses old stroke tail");
+    }
+    private static void invalidHoverExitReleasesButtonsAndTimestampOverflow() {
+        List<PenSample> samples = new ArrayList<>(); PenInput adapter = new PenInput(samples::add);
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_HOVER_MOVE, MotionEvent.BUTTON_STYLUS_PRIMARY, 0, 0, 0), 1001, 1001);
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_HOVER_EXIT,
+            new MotionEvent.Sample(1240, Float.NaN, 200, 0)), 1001, 1001);
+        check(samples.size() == 2 && samples.get(1).phase == PenSample.CANCEL && samples.get(1).buttons == 0,
+            "invalid hover exit releases held barrel buttons at the previous valid position");
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 1250, 0, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_EXIT, 1200, 0, 0, 0), 1001, 1001);
+        check(samples.size() == 4 && samples.get(3).phase == PenSample.CANCEL && samples.get(3).timeNanos == 1250000000L,
+            "stale hover exit still releases safely without rewinding coordinates or time");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, Long.MAX_VALUE, .5f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1254, .5f, 0, 0), 1001, 1001);
+        check(samples.size() == 4, "overflowing event time cannot begin a poisoned stroke");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1260, .5f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 1264, .5f, 0, 0), 1001, 1001, -1);
+        check(samples.size() == 6 && samples.get(5).phase == PenSample.CANCEL, "invalid surface rotation releases existing contact");
+    }
     public static void main(String[] args) {
         batchedStrokePreservesBeginning(); cancellationAndButtons(); unreliableTiltNeedsConsecutiveValidSamples();
         tiltHistoryAndContactOnlyDevices(); packedTiltRecoveryPreservesInputAndControls(); eraserAndButtonsAreDistinct();
-        System.out.println("Android input adapter history, release, tilt recovery and eraser diagnostics tests passed");
+        contactIgnoresHoverAndForeignDevices(); pointerIndicesAndUncapturedTails(); geometryAndInvalidPositions();
+        invalidHoverExitReleasesButtonsAndTimestampOverflow();
+        System.out.println("Android input adapter history, pointer isolation, geometry, invalid coordinates, tilt and release tests passed");
     }
 }

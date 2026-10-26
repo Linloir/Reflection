@@ -49,6 +49,10 @@ static std::string curve_text(const Mapping& mapping) {
 
 void Config::validate() const {
     mapping.validate();
+    stabilization.validate();
+    if (target_display.size() > 128 || std::any_of(target_display.begin(), target_display.end(),
+        [](unsigned char ch) { return ch < 0x20; }))
+        throw std::invalid_argument("invalid display identifier");
     if (transport != "tcp" && transport != "bluetooth")
         throw std::invalid_argument("transport must be tcp or bluetooth");
     if (!port) throw std::invalid_argument("port must be in 1..65535");
@@ -64,10 +68,22 @@ std::map<std::string, std::string> config_values(const Config& c, bool secrets) 
         {"bind", c.bind}, {"port", std::to_string(c.port)}, {"token", secrets ? c.token : "<redacted>"},
         {"mapping.mode", c.mapping.relative ? "relative" : "absolute"},
         {"mapping.source", rect_text(c.mapping.source)},
-        {"mapping.target", c.target_virtual_desktop ? "desktop" : rect_text(c.mapping.target)},
+        {"mapping.target", !c.target_display.empty() ? "display:" + c.target_display :
+            c.target_virtual_desktop ? "desktop" : rect_text(c.mapping.target)},
+        {"mapping.show_cursor", c.show_cursor ? "true" : "false"},
         {"mapping.rotation", std::to_string(c.mapping.rotation)},
         {"mapping.pressure_gamma", text(c.mapping.pressure_gamma)},
         {"mapping.pressure_curve", curve_text(c.mapping)},
+        {"mapping.pressure_interpolation", c.mapping.pressure_interpolation},
+        {"stabilization.enabled", c.stabilization.enabled ? "true" : "false"},
+        {"stabilization.adaptive_noise", c.stabilization.adaptive_noise ? "true" : "false"},
+        {"stabilization.independent_axes", c.stabilization.independent_axes ? "true" : "false"},
+        {"stabilization.strength", text(c.stabilization.strength)},
+        {"stabilization.min_cutoff_hz", text(c.stabilization.min_cutoff_hz)},
+        {"stabilization.beta", text(c.stabilization.beta)},
+        {"stabilization.derivative_cutoff_hz", text(c.stabilization.derivative_cutoff_hz)},
+        {"stabilization.noise", text(c.stabilization.noise)},
+        {"stabilization.max_jump", text(c.stabilization.max_jump)},
         {"mapping.position_steps_x", std::to_string(c.mapping.position_steps_x)},
         {"mapping.position_steps_y", std::to_string(c.mapping.position_steps_y)},
         {"mapping.tilt_enabled", c.mapping.tilt_enabled ? "true" : "false"},
@@ -102,13 +118,21 @@ void set_config(Config& c, const std::string& key, const std::string& value) {
         c.mapping.relative = value == "relative";
     } else if (key == "mapping.source") c.mapping.source = rectangle(value);
     else if (key == "mapping.target") {
+        c.target_display.clear();
         c.target_virtual_desktop = value == "desktop";
-        if (!c.target_virtual_desktop) c.mapping.target = rectangle(value);
+        if (value.rfind("display:", 0) == 0) {
+            c.target_display = value.substr(8);
+            if (c.target_display.empty()) throw std::invalid_argument("display target requires an identifier");
+        } else if (!c.target_virtual_desktop) c.mapping.target = rectangle(value);
+    } else if (key == "mapping.show_cursor") {
+        if (value != "true" && value != "false") throw std::invalid_argument("show_cursor requires true or false");
+        c.show_cursor = value == "true";
     } else if (key == "mapping.rotation") {
         const auto n = number(value);
         if (n != 0 && n != 90 && n != 180 && n != 270) throw std::invalid_argument("invalid rotation");
         c.mapping.rotation = static_cast<unsigned>(n);
     } else if (key == "mapping.pressure_gamma") c.mapping.pressure_gamma = number(value);
+    else if (key == "mapping.pressure_interpolation") c.mapping.pressure_interpolation = value;
     else if (key == "mapping.pressure_curve") {
         std::vector<std::pair<double, double>> points;
         std::istringstream stream(value);
@@ -132,6 +156,24 @@ void set_config(Config& c, const std::string& key, const std::string& value) {
         c.mapping.tilt_enabled = value == "true";
     } else if (key == "mapping.tilt_scale") c.mapping.tilt_scale = number(value);
     else if (key == "mapping.sensitivity") c.mapping.sensitivity = number(value);
+    else if (key == "stabilization.enabled") {
+        if(value!="true" && value!="false") throw std::invalid_argument("stabilization.enabled requires true or false");
+        c.stabilization.enabled=value=="true";
+    }
+    else if (key == "stabilization.adaptive_noise") {
+        if(value!="true" && value!="false") throw std::invalid_argument("stabilization.adaptive_noise requires true or false");
+        c.stabilization.adaptive_noise=value=="true";
+    }
+    else if (key == "stabilization.independent_axes") {
+        if(value!="true" && value!="false") throw std::invalid_argument("stabilization.independent_axes requires true or false");
+        c.stabilization.independent_axes=value=="true";
+    }
+    else if (key == "stabilization.strength") c.stabilization.strength=number(value);
+    else if (key == "stabilization.min_cutoff_hz") c.stabilization.min_cutoff_hz=number(value);
+    else if (key == "stabilization.beta") c.stabilization.beta=number(value);
+    else if (key == "stabilization.derivative_cutoff_hz") c.stabilization.derivative_cutoff_hz=number(value);
+    else if (key == "stabilization.noise") c.stabilization.noise=number(value);
+    else if (key == "stabilization.max_jump") c.stabilization.max_jump=number(value);
     else throw std::invalid_argument("unknown configuration key: " + key);
 }
 
@@ -174,9 +216,16 @@ static void write_values(const std::map<std::string, std::string>& values,
         if (!stream) throw std::runtime_error("cannot write configuration");
     }
 #ifdef _WIN32
-    if (!MoveFileExW(temporary.c_str(), path.c_str(),
-                    MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0)))
-        throw std::runtime_error("cannot atomically replace configuration");
+    for (unsigned attempt = 0; ; ++attempt) {
+        if (MoveFileExW(temporary.c_str(), path.c_str(),
+                       MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0))) break;
+        const DWORD error = GetLastError();
+        // A scanner may briefly retain the source or destination after the previous
+        // command. Retrying the same atomic rename never exposes partial settings.
+        if (attempt >= 5 || (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION))
+            throw std::runtime_error("cannot atomically replace configuration: Win32 " + std::to_string(error));
+        Sleep(10 * (attempt + 1));
+    }
 #else
     if (replace) std::filesystem::rename(temporary, path);
     else std::filesystem::create_hard_link(temporary, path);
@@ -233,6 +282,8 @@ Config load_profile(Config config, const std::filesystem::path& config_path, con
     // Missing keys in an older profile use mapping defaults, never the active profile's leftovers.
     config.mapping = Mapping{};
     config.target_virtual_desktop = true;
+    config.target_display.clear();
+    config.show_cursor = true;
     std::map<std::string, bool> seen;
     std::string line;
     while (std::getline(stream, line)) {

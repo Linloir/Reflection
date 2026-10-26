@@ -63,6 +63,14 @@ final class ReflectionAppModel: ObservableObject {
     @Published var dryRun = false
     @Published var tabletPointEvents = false
     @Published var mappingJSON = ""
+    @Published var liveMapping: MappingStatus?
+    @Published var calibration: CalibrationStatus?
+    @Published var mappingShortcutsEnabled = UserDefaults.standard.object(forKey: "mappingShortcutsEnabled") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(mappingShortcutsEnabled, forKey: "mappingShortcutsEnabled")
+            configureMappingShortcuts()
+        }
+    }
 
     let configurationURL: URL
     private let executable: URL
@@ -72,6 +80,9 @@ final class ReflectionAppModel: ObservableObject {
     private var polling: Task<Void, Never>?
     private var originalData = Data()
     private var originalFileData = Data()
+    private var mappingShortcuts: MappingShortcuts?
+    private let mappingFeedback = MappingFeedback()
+    private var mappingProcessID: Int?
 
     init() {
         let args = CommandLine.arguments
@@ -90,6 +101,7 @@ final class ReflectionAppModel: ObservableObject {
         reloadConfiguration(createIfMissing: true)
         refreshDisplays()
         refreshProfiles()
+        configureMappingShortcuts()
         polling = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -111,6 +123,80 @@ final class ReflectionAppModel: ObservableObject {
         if busy { return "Updating host" }
         if connected && running { return "Tablet connected" }
         return running ? "Waiting for tablet" : "Host stopped"
+    }
+
+    var mappingLabel: String {
+        guard let liveMapping, running else { return "Start the host to switch displays live." }
+        let label = liveMapping.mode == "all" ? "All displays" : liveMapping.mode == "custom" ? "Custom desktop area"
+            : liveMapping.displays.first(where: { $0.id == liveMapping.selected })?.name ?? "Selected display"
+        return label + (liveMapping.pending ? " · Switch waits for pen-up" : "")
+            + (liveMapping.fallback ? " · Selected display unavailable; using all displays" : "")
+    }
+
+    var stabilizationStatus: [String: Any] { status["stabilization"] as? [String: Any] ?? [:] }
+    var calibrationActive: Bool { calibration?.active ?? false }
+
+    func calibrate(_ command: String) {
+        guard running, !busy else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                let data = try await HostCommand.run(executable: executable, configuration: configurationURL,
+                                                     arguments: ["calibration", command])
+                let result = try JSONDecoder().decode(CalibrationStatus.self, from: data)
+                calibration = result
+                if result.result == "success" {
+                    let diskData = try Data(contentsOf: configurationURL)
+                    let disk = try JSONDecoder().decode(ServerConfiguration.self, from: diskData)
+                    if var previousFile = try? JSONDecoder().decode(ServerConfiguration.self, from: originalFileData) {
+                        previousFile.stabilization.noise = disk.stabilization.noise
+                        externalConfigurationChange = (try? encoded(previousFile)) != (try? encoded(disk))
+                    }
+                    configuration.stabilization.noise = disk.stabilization.noise
+                    if var baseline = try? JSONDecoder().decode(ServerConfiguration.self, from: originalData) {
+                        baseline.stabilization.noise = disk.stabilization.noise
+                        originalData = try encoded(baseline)
+                    }
+                    if !externalConfigurationChange { originalFileData = diskData }
+                }
+                notice = result.reason
+                if result.phase == "failed" { error = result.reason }
+            } catch { self.error = String(describing: error) }
+        }
+    }
+
+    private func configureMappingShortcuts() {
+        mappingShortcuts?.stop()
+        mappingShortcuts = nil
+        if mappingShortcutsEnabled {
+            mappingShortcuts = MappingShortcuts { [weak self] in self?.switchMapping($0) }
+        }
+    }
+
+    private func receiveMapping(_ snapshot: MappingStatus) {
+        if let previous = liveMapping, snapshot.revision < previous.revision { return }
+        let changed = liveMapping.map { $0.mode != snapshot.mode || $0.selected != snapshot.selected || $0.target != snapshot.target } ?? false
+        liveMapping = snapshot
+        if changed { mappingFeedback.show(snapshot) }
+    }
+
+    func switchMapping(_ action: String, displayID: String? = nil) {
+        guard running, !busy else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                let arguments = ["mapping", action] + (displayID.map { [$0] } ?? [])
+                let data = try await HostCommand.run(executable: executable, configuration: configurationURL, arguments: arguments)
+                receiveMapping(try JSONDecoder().decode(MappingStatus.self, from: data))
+                notice = mappingLabel
+            } catch { self.error = String(describing: error) }
+        }
+    }
+
+    func identifyMapping() {
+        if let liveMapping, running { mappingFeedback.show(liveMapping) }
     }
 
     private func encoded<T: Encodable>(_ value: T) throws -> Data {
@@ -212,6 +298,16 @@ final class ReflectionAppModel: ObservableObject {
             let data = try await HostCommand.run(executable: executable, configuration: configurationURL, arguments: ["status"])
             status = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
             running = status["processAlive"] as? Bool ?? false
+            let pid = (status["pid"] as? NSNumber)?.intValue
+            if pid != mappingProcessID { liveMapping = nil; mappingProcessID = pid }
+            if running, let mapping = status["mapping"],
+               let data = try? JSONSerialization.data(withJSONObject: mapping),
+               let snapshot = try? JSONDecoder().decode(MappingStatus.self, from: data) { receiveMapping(snapshot) }
+            if !running { liveMapping = nil }
+            if let value = status["calibration"],
+               let data = try? JSONSerialization.data(withJSONObject: value) {
+                calibration = try? JSONDecoder().decode(CalibrationStatus.self, from: data)
+            }
         } catch {
             status = [:]
             running = ownedHost?.isRunning ?? false
@@ -350,6 +446,8 @@ final class ReflectionAppModel: ObservableObject {
 
     func terminateOwnedHost() {
         polling?.cancel()
+        mappingShortcuts?.stop()
+        mappingFeedback.hide()
         if let ownedHost, ownedHost.isRunning { ownedHost.terminate() }
     }
 

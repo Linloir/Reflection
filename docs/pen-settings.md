@@ -26,8 +26,15 @@ macOS 的目标区域使用桌面逻辑坐标，Windows 使用物理像素。
 具体语法见 [配置与 CLI](configuration.md)。Gamma 小于 1 提升中段压力，
 大于 1 压低中段压力；自定义曲线替代 Gamma。曲线不改变真实采样数量或系统压力位数。
 
+控制点支持 **Linear points（折线）** 和 **Smooth curve（平滑曲线）**。
+点击图中空白处增加点，拖动点调整输入/输出压力；选中后可删除内部点。
+平滑模式使用单调三次 Hermite 插值穿过控制点，保持端点与平台段，不产生过冲。
+两种模式都要求输入递增、输出不递减；切换模式保留同一组控制点。
+Windows 配置键为 `mapping.pressure_interpolation`，macOS 为
+`mapping.pressureInterpolation`，取值 `linear` 或 `smooth`；旧配置默认保持折线行为。
+
 可以为会议书写、草图和绘画分别保存 profile。它保存压力、倾斜和映射等设置，
-不会更改连接密钥或 Android 防抖校准。应用 profile 后重启宿主，使一整段
+不会更改连接密钥。防抖与校准现在由电脑端管理，见 [防抖说明](stabilization.md)。应用 profile 后重启宿主，使一整段
 笔画使用同一份参数。切换应用不会自动切换 profile。
 
 ## 倾斜忽强忽弱
