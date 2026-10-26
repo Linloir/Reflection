@@ -4,6 +4,51 @@ Reflection 把平板的笔输入映射到 Mac 桌面。此子项目使用 Swift�
 CryptoKit 和 CoreGraphics，提供独立的 `ReflectionCore` 库和 `reflection` 命令行。
 当前最低系统版本为 macOS 12，不依赖第三方运行库。
 
+## 桌面应用
+
+`Reflection.app` 使用原生 SwiftUI 界面，包含连接状态、实时输入诊断、压感曲线、
+倾斜设置、映射区域、坐标精度和多套 profile。界面使用与 CLI 相同的配置验证和映射核心，
+通过随应用提供的主机程序启动、停止及重启服务，配置也与 CLI 共用。
+
+使用包含 macOS 26 或更新 SDK 的 Apple 工具链构建：
+
+```sh
+server/macos/scripts/build-app.sh
+open server/macos/build/Reflection.app
+```
+
+脚本在 `server/macos/build/Reflection.app` 生成完整应用，默认执行本地 ad-hoc 签名。
+可传入其他以 `.app` 结尾的输出路径。用于公开分发时应使用 Developer ID 签名及公证。
+可以先把应用移动到「应用程序」文件夹，再授予辅助功能权限，避免移动后重新授权。
+
+macOS 26 及更新系统使用 Liquid Glass 控件表面；macOS 12–25 使用系统材质作为回退，
+并使用相应系统版本提供的原生导航和控件。构建使用新 SDK，部署下限仍为 macOS 12。
+界面随系统切换明暗外观，不需要单独主题配置。
+
+界面的操作分为编辑和应用两个步骤：
+
+- **Save** 保存配置；运行中的主机继续使用启动时的配置。
+- **Apply & restart** 保存配置并安全重启主机，释放当前笔状态后应用新设置。
+- **Pen response** 提供 gamma、软/硬预设、可拖动控制点及精确数字输入。预览调用实际
+  映射核心；自定义曲线优先于 gamma。实时压力标记显示输入在当前编辑曲线上的结果。
+- **Profiles** 保存当前映射和笔响应；加载后先进入编辑器，再自行应用。profile 不包含
+  配对密钥或监听地址。删除 profile 不改变当前配置。
+- **Mapping** 支持绝对/相对模式、显示器/桌面区域、平板有效区域、旋转、等比映射及
+  软件坐标网格；网格不会改变硬件采样率或 LPI。
+- **Connection** 可设置地址、端口和密钥，以及下次从界面启动主机时使用的蓝牙、
+  dry-run 和实验 tablet-point 选项。密钥默认隐藏。
+
+应用启动后不会自动注入输入。关闭应用会停止由它启动的主机；从 CLI 启动的独立主机
+不会因关闭窗口而停止。界面每秒刷新一次状态，笔输入处理仍在独立的主机进程内完成。
+如果 CLI 或其他程序修改了配置，界面会提示重新加载，避免覆盖外部更改。
+自定义配置路径可通过 `open .../Reflection.app --args --config PATH` 传入。
+
+首次使用桌面应用时，需要为 Reflection 自身授予辅助功能权限；终端已有的授权不会
+自动授予桌面应用。非 dry-run 的 **Start host** 和 **Apply & restart** 会先使用随包
+主机检查当前启动身份的授权。权限缺失或无法确认时，界面显示操作提示，不停止正在运行的
+主机，也不保存该次应用操作的配置草稿。可在 **Diagnostics → Open Accessibility
+Settings** 中打开系统设置，授权后重试。dry-run 不需要此权限。
+
 ## 构建与运行
 
 安装 Apple Command Line Tools 或 Xcode 后，在仓库根目录执行：
@@ -84,7 +129,7 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 
 ## 配置与 CLI
 
-所有控制能力都由 CLI 提供，未来界面可直接调用相同核心库。运行中的服务使用启动时的
+所有控制能力都由 CLI 提供，桌面界面使用相同核心库和主机程序。运行中的服务使用启动时的
 配置快照，修改配置后需重新启动。
 
 | 命令 | 作用 |
@@ -93,7 +138,13 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 | `config show` | 输出配置 JSON，默认隐藏密钥 |
 | `config show --reveal-token` | 显示完整配置，适合受控自动化 |
 | `config set KEY JSON_VALUE` | 修改并验证指定字段 |
+| `config apply KEY JSON_VALUE ...` | 整体验证并原子保存多个字段 |
 | `config validate` | 验证配置，不启动输入服务 |
+| `profiles list` | 列出保存的映射 profile |
+| `profiles save NAME [--replace]` | 保存当前笔响应和映射；覆盖需显式指定 `--replace` |
+| `profiles show NAME` | 输出 profile JSON，不含配对信息 |
+| `profiles load NAME` | 将 profile 写入当前配置，重启后生效 |
+| `profiles delete NAME` | 删除指定 profile，保持当前配置 |
 | `pair` | 显示配对所需协议版本、端口和密钥 |
 | `displays` | 列出显示器 ID、桌面区域及物理像素尺寸 |
 | `doctor` | 输出授权、配置、后端和显示器诊断 |
@@ -102,11 +153,60 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 | `start --bluetooth` | 同时提供原生 RFCOMM 服务 |
 | `start --tablet-point-events` | 额外发送独立 tabletPoint 事件；用于应用精度兼容实验 |
 | `status` | 输出最近状态快照及进程存活检查 |
+| `stop` | 通过当前配置的本机控制通道请求安全停止 |
 
 `status` 的快照文件与配置同目录，名称为 `server.status.json`，或随自定义配置文件名
 变化。快照通常每秒更新，包含样本数、会话数、最后样本、最后映射坐标和断连原因；
 记录后端另外提供 `contactDown`、`backendReleaseCount`，便于验证断线自动抬笔。
 它是上次运行的快照，需结合 `processAlive`、`updatedAt` 和 `state` 判断当前状态。
+`processAlive` 通过同用户本机控制通道确认，停止请求不依赖状态文件中可能过期的 PID。
+`stop` 返回后可查询 `status`，确认 `processAlive` 为 `false` 后启动下一实例。
+
+### 压感、倾斜与 profile
+
+默认使用 gamma 曲线。自定义曲线由 2–32 个归一化控制点组成，首尾固定为 `(0, 0)` 和
+`(1, 1)`，输入坐标必须严格递增，输出不得递减。各点间使用线性插值；非空自定义曲线
+优先于 gamma，设为空数组即可恢复 gamma 模式。
+
+```sh
+reflection config set mapping.pressureCurve \
+  '[{"input":0,"output":0},{"input":0.25,"output":0.45},{"input":0.5,"output":0.72},{"input":0.75,"output":0.9},{"input":1,"output":1}]'
+reflection profiles save "Soft pencil"
+reflection config apply mapping.pressureCurve '[]' mapping.pressureGamma 1.4
+reflection profiles save "Firm ink"
+reflection profiles list
+reflection profiles load "Soft pencil"
+```
+
+`mapping.tiltEnabled` 控制是否输出倾斜；`mapping.tiltScale` 范围为 0–2，默认 1，
+表示保留采集到的倾角。缩放后限制在每轴 -90–90 度。此设置不会创造硬件不支持的倾斜数据。
+
+界面中的 **Received tilt X / Y** 与 `status.lastSample` 显示客户端处理后发送的角度，
+尚未经过宿主的旋转、开关或比例映射。它们不是 Android 原始轴值，也不表示目标应用
+实际使用了这些角度。零值可能表示直立、输入不可用或客户端关闭倾斜；协议 v1 不传输
+逐样本的可靠性状态，需要结合平板诊断判断。状态界面每秒刷新一次，最后一条悬停样本
+可能覆盖之前的接触笔画。
+
+Android 的 Auto / Standard / Off 控制采集侧的倾斜处理，与宿主开关和 profile 独立。
+Auto 仅对匹配已验证特征的 Note2 输入启用一维兼容恢复，不需要校准；它不能补回当前
+输入链路缺少的第二轴。已测竖屏方向恢复的是屏幕上下方向的倾斜，左右方向仍缺失。
+对应已测固件的设备驱动解析错误已确认，完整修复需要驱动正确上报原始报告，
+宿主参数无法补回驱动丢弃的数据。未匹配设备继续使用标准 Android 路径。
+详细边界与排查步骤见
+[笔设置与排障](../../docs/pen-settings.md)。
+
+```sh
+reflection config apply mapping.tiltEnabled true mapping.tiltScale 1.0
+reflection config apply mapping.positionStepsX 4096 mapping.positionStepsY 4096
+```
+
+`positionStepsX/Y` 分别定义映射后的 X/Y 软件坐标网格。`0` 保留原有浮点精度；
+`2–65536` 限制该轴的可用位置数，包含两端。它调整的是**输出位置量化**，不改变平板硬件
+LPI、采样率、压感级数或 Retina 分辨率。通常保持 `0`；需要特定位置网格时才设置。
+位置网格不应作为消除硬件抖动的替代手段。
+
+Profile 与配置并列保存在 `server.profiles` 目录，自定义配置名对应自己的 profile 目录。
+内容只有映射和笔响应，不含 token、监听地址或启动参数。修改、加载 profile 后需重启主机。
 
 ### 映射
 

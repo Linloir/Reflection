@@ -11,11 +11,16 @@ Usage: reflection [--config PATH] COMMAND [OPTIONS]
   config init                     Create a private config and random pairing token
   config show [--reveal-token]     Show JSON configuration (token redacted by default)
   config set KEY JSON_VALUE       Set a config field, for example mapping.pressureGamma 1.3
+  config apply KEY JSON_VALUE ... Atomically validate and save several fields
   config validate                 Validate configuration
+  profiles list                   List saved mapping profiles
+  profiles save NAME [--replace]   Save mapping, pressure, tilt and resolution settings
+  profiles show|load|delete NAME   Inspect, activate or delete a profile
   pair                            Show the pairing token (sensitive; do not share logs)
   displays                        List display IDs and desktop coordinates as JSON
   doctor                          Report permissions, backend capabilities and config health
-  status                          Show the last server status snapshot
+  status                          Show status and verify the live host control channel
+  stop                            Gracefully stop the host using this configuration
   start [--dry-run] [--verbose] [--bluetooth] [--tablet-point-events]
                                   Run server; optionally publish native Bluetooth RFCOMM
   help                            Show this help
@@ -67,6 +72,7 @@ func main() throws {
         configURL = URL(fileURLWithPath: args[i + 1])
         args.removeSubrange(i...i + 1)
     }
+    configURL = configURL.standardizedFileURL.resolvingSymlinksInPath()
     let command = args.first ?? "help"
     let statusURL = configURL.deletingPathExtension().appendingPathExtension("status.json")
     switch command {
@@ -88,17 +94,53 @@ func main() throws {
         case "validate":
             _ = try ServerConfiguration.load(from: configURL)
             try printJSON(["valid": true])
-        case "set":
-            guard args.count == 4 else { throw ReflectionError.invalid("config set requires KEY JSON_VALUE") }
+        case "set", "apply":
+            guard args.count >= 4, args.count % 2 == 0,
+                  args[1] != "set" || args.count == 4 else {
+                throw ReflectionError.invalid("config set/apply requires KEY JSON_VALUE pairs")
+            }
             let config = try ServerConfiguration.load(from: configURL)
             var object = try encodedObject(config) as! [String: Any]
-            let value = try JSONSerialization.jsonObject(with: Data(args[3].utf8), options: [.fragmentsAllowed])
-            try setNested(&object, path: args[2].split(separator: ".").map(String.init)[...], value: value)
+            var keys = [String]()
+            for index in stride(from: 2, to: args.count, by: 2) {
+                let value = try JSONSerialization.jsonObject(with: Data(args[index + 1].utf8), options: [.fragmentsAllowed])
+                try setNested(&object, path: args[index].split(separator: ".").map(String.init)[...], value: value)
+                keys.append(args[index])
+            }
             let updated = try JSONDecoder().decode(ServerConfiguration.self,
                 from: JSONSerialization.data(withJSONObject: object))
             try updated.save(to: configURL)
-            try printJSON(["updated": args[2], "restartRequired": true])
+            try printJSON(["updated": keys, "restartRequired": true])
         default: throw ReflectionError.invalid("Unknown config command")
+        }
+    case "profiles":
+        guard args.count >= 2 else { throw ReflectionError.invalid("profiles needs list, save, show, load, or delete") }
+        let store = ProfileStore(configurationURL: configURL)
+        switch args[1] {
+        case "list":
+            guard args.count == 2 else { throw ReflectionError.invalid("profiles list takes no arguments") }
+            try printJSON(["profiles": store.list()])
+        case "save":
+            guard args.count == 3 || (args.count == 4 && args[3] == "--replace") else {
+                throw ReflectionError.invalid("profiles save requires NAME [--replace]")
+            }
+            try store.save(name: args[2], mapping: ServerConfiguration.load(from: configURL).mapping,
+                           overwrite: args.contains("--replace"))
+            try printJSON(["saved": args[2]])
+        case "show", "load", "delete":
+            guard args.count == 3 else { throw ReflectionError.invalid("profiles \(args[1]) requires NAME") }
+            if args[1] == "show" {
+                try printJSON(encodedObject(MappingProfile(mapping: store.load(name: args[2]))))
+            } else if args[1] == "delete" {
+                try store.delete(name: args[2])
+                try printJSON(["deleted": args[2]])
+            } else {
+                var config = try ServerConfiguration.load(from: configURL)
+                config.mapping = try store.load(name: args[2])
+                try config.save(to: configURL)
+                try printJSON(["loaded": args[2], "restartRequired": true])
+            }
+        default: throw ReflectionError.invalid("Unknown profiles command")
         }
     case "pair":
         let config = try ServerConfiguration.load(from: configURL)
@@ -130,14 +172,24 @@ func main() throws {
         result["displays"] = try encodedObject(availableDisplays())
         try printJSON(result)
     case "status":
-        let data = try Data(contentsOf: statusURL)
-        var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        if let pid = object["pid"] as? Int32 { object["processAlive"] = kill(pid, 0) == 0 }
-        object["snapshot"] = true
+        var object: [String: Any] = ["state": "stopped", "snapshot": false]
+        if let data = try? Data(contentsOf: statusURL),
+           let saved = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            object = saved
+            object["snapshot"] = true
+        }
+        let running = HostControl.isRunning(configurationURL: configURL)
+        object["processAlive"] = running
+        object["controlAvailable"] = running
         try printJSON(object)
+    case "stop":
+        try HostControl.requestStop(configurationURL: configURL)
+        try printJSON(["stopRequested": true])
     case "start":
         let allowed = Set(["start", "--dry-run", "--verbose", "--bluetooth", "--tablet-point-events"])
         guard args.allSatisfy(allowed.contains) else { throw ReflectionError.invalid("Unknown start option") }
+        var shutdown: (() -> Void)?
+        let control = try HostControl(configurationURL: configURL) { shutdown?() }
         let config = try ServerConfiguration.load(from: configURL)
         let displays = try availableDisplays()
         let target: Region
@@ -167,17 +219,21 @@ func main() throws {
         let bluetooth = args.contains("--bluetooth")
             ? BluetoothBridge(host: config.bind, port: config.port) : nil
         try bluetooth?.start()
+        var stopping = false
+        shutdown = {
+            guard !stopping else { return }
+            stopping = true
+            bluetooth?.stop()
+            server.stop { exit(0) }
+        }
         for signum in [SIGINT, SIGTERM] {
             signal(signum, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: signum, queue: .main)
-            source.setEventHandler {
-                bluetooth?.stop()
-                server.stop { exit(0) }
-            }
+            source.setEventHandler { shutdown?() }
             source.resume()
             signalSources.append(source)
         }
-        RunLoop.main.run()
+        withExtendedLifetime(control) { RunLoop.main.run() }
     default: throw ReflectionError.invalid("Unknown command: \(command). Run reflection help.")
     }
 }

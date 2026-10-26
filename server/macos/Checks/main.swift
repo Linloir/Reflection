@@ -243,6 +243,97 @@ do {
     check((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "private config permissions")
     let loaded = try ServerConfiguration.load(from: configURL)
     check(loaded.token == saved.token, "config round trip")
+
+    var legacyObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(saved)) as! [String: Any]
+    var legacyMapping = legacyObject["mapping"] as! [String: Any]
+    for name in ["pressureCurve", "positionStepsX", "positionStepsY", "tiltEnabled", "tiltScale"] {
+        legacyMapping.removeValue(forKey: name)
+    }
+    legacyObject["mapping"] = legacyMapping
+    let legacy = try JSONDecoder().decode(ServerConfiguration.self,
+        from: JSONSerialization.data(withJSONObject: legacyObject))
+    check(legacy.mapping == MappingConfiguration(), "old configuration gains neutral defaults")
+
+    var curve = MappingConfiguration()
+    curve.pressureGamma = 2
+    check(curve.mapPressure(0.5) == 0.25, "empty curve preserves gamma")
+    curve.pressureCurve = [.init(input: 0, output: 0), .init(input: 0.25, output: 0.5),
+                          .init(input: 0.75, output: 0.9), .init(input: 1, output: 1)]
+    try curve.validate()
+    check(curve.mapPressure(0) == 0 && curve.mapPressure(1) == 1, "curve endpoints")
+    check(abs(curve.mapPressure(0.5) - 0.7) < 1e-12, "piecewise curve replaces gamma")
+    check(curve.mapPressure(-1) == 0 && curve.mapPressure(2) == 1, "curve input clamped")
+    let curvedMapper = CoordinateMapper(configuration: curve, target: Region(x: 0, y: 0, width: 101, height: 101))
+    for phase in [PenPhase.up, .cancel, .leave, .hover] {
+        check(curvedMapper.map(sample(x: 0.5, y: 0.5, phase: phase)).pressure == 0,
+              "curve cannot create pressure outside contact \(phase.rawValue)")
+    }
+    for invalidCurve: [PressurePoint] in [
+        [.init(input: 0, output: 0)],
+        [.init(input: 0, output: 0.1), .init(input: 1, output: 1)],
+        [.init(input: 0, output: 0), .init(input: 0, output: 0.5), .init(input: 1, output: 1)],
+        [.init(input: 0, output: 0), .init(input: 0.3, output: 0.8),
+         .init(input: 0.6, output: 0.2), .init(input: 1, output: 1)],
+        [.init(input: 0, output: 0), .init(input: .nan, output: 0.5), .init(input: 1, output: 1)]
+    ] {
+        var invalidMapping = curve
+        invalidMapping.pressureCurve = invalidCurve
+        rejects("invalid pressure curve") { try invalidMapping.validate() }
+    }
+    var resolution = MappingConfiguration()
+    resolution.positionStepsX = 5
+    resolution.positionStepsY = 3
+    let quantized = CoordinateMapper(configuration: resolution, target: Region(x: -100, y: -50, width: 101, height: 101))
+    check(quantized.map(sample(x: 0.36, y: 0.6)).point == CGPoint(x: -75, y: 0), "coordinate levels and negative origin")
+    check(quantized.map(sample(x: 1, y: 1)).point == CGPoint(x: 0, y: 50), "coordinate grid includes endpoint")
+    resolution.mode = "relative"
+    let fineRelative = CoordinateMapper(configuration: resolution,
+        target: Region(x: 0, y: 0, width: 101, height: 101), initialCursor: .zero)
+    _ = fineRelative.map(sample(x: 0, y: 0))
+    var fineRelativePoint = CGPoint.zero
+    for step in 1...20 {
+        fineRelativePoint = fineRelative.map(sample(x: Double(step) * 0.01, y: 0)).point
+    }
+    check(fineRelativePoint.x == 25, "quantized relative motion accumulates substep deltas")
+    for steps in [-1, 1, 65537] {
+        var invalidMapping = MappingConfiguration()
+        invalidMapping.positionStepsY = steps
+        rejects("invalid coordinate steps \(steps)") { try invalidMapping.validate() }
+    }
+    var tiltConfig = MappingConfiguration()
+    tiltConfig.tiltEnabled = false
+    let disabledTilt = CoordinateMapper(configuration: tiltConfig,
+        target: Region(x: 0, y: 0, width: 100, height: 100)).map(tilted)
+    check(disabledTilt.tiltX == 0 && disabledTilt.tiltY == 0 && disabledTilt.sample.tiltX == 45,
+          "tilt disabled without mutating raw sample")
+    tiltConfig.tiltEnabled = true
+    tiltConfig.tiltScale = 2
+    tiltConfig.rotation = 90
+    let scaledTilt = CoordinateMapper(configuration: tiltConfig,
+        target: Region(x: 0, y: 0, width: 100, height: 100)).map(tilted)
+    check(scaledTilt.tiltX == 0 && scaledTilt.tiltY == 90, "tilt scale after rotation")
+
+    let profiles = ProfileStore(configurationURL: configURL)
+    let initialProfiles = try profiles.list()
+    check(initialProfiles.isEmpty, "missing profile directory is empty")
+    try profiles.save(name: "Soft pencil", mapping: curve)
+    let firstProfile = try profiles.load(name: "Soft pencil")
+    let savedProfiles = try profiles.list()
+    check(firstProfile == curve, "profile round trip")
+    check(savedProfiles == ["Soft pencil"], "profile enumeration")
+    rejects("profile overwrite requires explicit option") { try profiles.save(name: "Soft pencil", mapping: resolution) }
+    try profiles.save(name: "Soft pencil", mapping: resolution, overwrite: true)
+    let replacedProfile = try profiles.load(name: "Soft pencil")
+    check(replacedProfile == resolution, "explicit profile replacement")
+    let profileText = try String(contentsOf: profiles.directory.appendingPathComponent("Soft pencil.json"), encoding: .utf8)
+    check(!profileText.contains("token") && !profileText.contains("port") && !profileText.contains("bind"),
+          "profiles exclude credentials and listener settings")
+    for invalidName in ["", "../escape", "a/b", "name.json", " trailing ", String(repeating: "x", count: 65)] {
+        rejects("invalid profile name") { try profiles.save(name: invalidName, mapping: curve) }
+    }
+    try profiles.delete(name: "Soft pencil")
+    let remainingProfiles = try profiles.list()
+    check(remainingProfiles.isEmpty, "profile deletion")
     print("{\"checks\":\(passed),\"result\":\"passed\"}")
 } catch {
     fputs("FAIL: \(error)\n", stderr)

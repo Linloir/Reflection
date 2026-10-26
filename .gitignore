@@ -45,6 +45,17 @@ cmake-build-*/
 *.pdb
 *.ilk
 *.obj
+# .NET / WinUI packaging
+**/bin/
+**/obj/
+AppPackages/
+BundleArtifacts/
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.user
+*.suo
 
 # Python and generated reports
 __pycache__/

@@ -117,6 +117,14 @@ def build(target):
             run(["cmake", "--build", "server/windows/build", "--config", "Release"])
         else:
             raise RuntimeError("Build the host server on macOS or Windows")
+    if target in ("ui", "all"):
+        if platform.system() == "Darwin":
+            run(["bash", "server/macos/scripts/build-app.sh"])
+        elif platform.system() == "Windows":
+            run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", "server/windows/scripts/build-ui.ps1"])
+        else:
+            raise RuntimeError("Build the desktop UI on macOS or Windows")
     if target in ("android", "all"):
         if platform.system() == "Windows":
             gradle = shutil.which("gradle")
@@ -161,6 +169,47 @@ def install_server(args):
         "pathEntry": str(directory),
         "note": "Add pathEntry to PATH. The native CLI runs independently of this checkout.",
     })
+
+
+def native_ui():
+    if platform.system() == "Darwin":
+        choices = [Path.home() / "Applications/Reflection.app",
+                   ROOT / "server/macos/build/Reflection.app"]
+    elif platform.system() == "Windows":
+        choices = [Path(os.environ["LOCALAPPDATA"]) / "Reflection/app/Reflection.Desktop.exe",
+                   ROOT / "server/windows/build/ui/Reflection.Desktop.exe"]
+    else:
+        raise RuntimeError("The desktop UI is available for macOS and Windows")
+    for path in choices:
+        if path.exists():
+            return path
+    raise RuntimeError("Desktop UI not found; run: python3 reflection build ui")
+
+
+def install_ui(args):
+    if platform.system() == "Darwin":
+        source = ROOT / "server/macos/build/Reflection.app"
+        parent = Path(args.destination).expanduser().resolve() if args.destination else Path.home() / "Applications"
+        target = parent / "Reflection.app"
+    elif platform.system() == "Windows":
+        source = ROOT / "server/windows/build/ui"
+        target = (Path(args.destination).expanduser().resolve() if args.destination
+                  else Path(os.environ["LOCALAPPDATA"]) / "Reflection/app")
+    else:
+        raise RuntimeError("The desktop UI is available for macOS and Windows")
+    if not source.is_dir():
+        raise RuntimeError("Desktop UI is not built; run: python3 reflection build ui")
+    if source.resolve() != target.resolve():
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    json_print({"installed": str(target), "note": "Launch the app or run: reflection ui"})
+
+
+def launch_ui(args):
+    path = native_ui()
+    if platform.system() == "Darwin":
+        run(["open", "-a", path] + (["--args", "--config", args.config] if args.config else []))
+    else:
+        subprocess.Popen([str(path)] + config_args(args), cwd=path.parent)
 
 
 def pair_android(args):
@@ -224,12 +273,14 @@ def parser():
     p = argparse.ArgumentParser(description="Reflection build, installation, pairing, and diagnostics")
     commands = p.add_subparsers(dest="command", required=True)
     b = commands.add_parser("build", help="Build native artifacts")
-    b.add_argument("target", choices=("android", "server", "all"))
+    b.add_argument("target", choices=("android", "server", "ui", "all"))
     i = commands.add_parser("install", help="Install the Android APK or a user-local host executable")
-    i.add_argument("target", choices=("android", "server"))
+    i.add_argument("target", choices=("android", "server", "ui"))
     i.add_argument("--apk")
     i.add_argument("--serial")
-    i.add_argument("--destination", help="Host executable installation directory")
+    i.add_argument("--destination", help="Host executable directory, macOS Applications directory, or Windows UI directory")
+    ui = commands.add_parser("ui", help="Launch the native desktop settings app")
+    ui.add_argument("--config")
     s = commands.add_parser("server", help="Forward arguments to the native host CLI", add_help=False)
     s.add_argument("arguments", nargs=argparse.REMAINDER)
     d = commands.add_parser("doctor", help="Report toolchain, server, and Android availability as JSON")
@@ -243,7 +294,9 @@ def parser():
                                      "preview-on", "preview-off", "selftest", "launch",
                                      "stabilization", "stabilization-on", "stabilization-off",
                                      "calibration-start", "calibration-finish",
-                                     "calibration-cancel", "calibration-reset"))
+                                     "calibration-cancel", "calibration-reset", "tilt"))
+    a.add_argument("tilt_mode", nargs="?", choices=("auto", "standard", "off", "status", "reset"),
+                   help="For android tilt: select capture mode, inspect status, or restart detection")
     a.add_argument("--serial")
     pair = commands.add_parser("pair-android", help="Copy native server pairing settings over authorized ADB")
     pair.add_argument("--config")
@@ -274,7 +327,9 @@ def main(argv=None):
         if args.command == "build":
             build(args.target)
         elif args.command == "install":
-            install_android(args) if args.target == "android" else install_server(args)
+            {"android": install_android, "server": install_server, "ui": install_ui}[args.target](args)
+        elif args.command == "ui":
+            launch_ui(args)
         elif args.command == "doctor":
             doctor(args)
         elif args.command == "pair-android":
@@ -290,8 +345,16 @@ def main(argv=None):
                 command += ["tcp:" + str(args.port)]
             run(adb_prefix(args.serial) + command)
         elif args.command == "android":
+            if args.tilt_mode is not None and args.action != "tilt":
+                raise ValueError("The mode argument is only accepted by android tilt")
             adb = adb_prefix(args.serial)
-            if args.action == "launch":
+            if args.action == "tilt":
+                if args.tilt_mode == "reset":
+                    json_print(broadcast(adb, "tilt-reset"))
+                else:
+                    json_print(broadcast(adb, "tilt",
+                        {} if args.tilt_mode in (None, "status") else {"mode": args.tilt_mode}))
+            elif args.action == "launch":
                 run(adb + ["shell", "am", "start", "-n", PACKAGE + "/.ui.MainActivity"])
             elif args.action.startswith("preview-"):
                 json_print(broadcast(adb, "preview", {"enabled": args.action == "preview-on"}))

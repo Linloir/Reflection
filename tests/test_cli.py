@@ -63,6 +63,23 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(extras["port"], 24819)
         self.assertNotIn(token, repr(output.call_args))
 
+    def test_tilt_modes_and_detection_reset_have_distinct_controls(self):
+        with patch.object(cli, "adb_prefix", return_value=["adb", "-s", "test"]), \
+             patch.object(cli, "broadcast", return_value={}) as broadcast, \
+             patch.object(cli, "json_print"):
+            for mode in ("auto", "standard", "off"):
+                self.assertEqual(cli.main(["android", "tilt", mode]), 0)
+                broadcast.assert_called_with(["adb", "-s", "test"], "tilt", {"mode": mode})
+            for suffix in ([], ["status"]):
+                self.assertEqual(cli.main(["android", "tilt"] + suffix), 0)
+                broadcast.assert_called_with(["adb", "-s", "test"], "tilt", {})
+            self.assertEqual(cli.main(["android", "tilt", "reset"]), 0)
+            broadcast.assert_called_with(["adb", "-s", "test"], "tilt-reset")
+            broadcast.reset_mock()
+            with patch("sys.stderr"):
+                self.assertEqual(cli.main(["android", "calibration-reset", "auto"]), 1)
+            broadcast.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

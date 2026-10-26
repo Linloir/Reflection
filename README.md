@@ -17,11 +17,12 @@ macOS 使用 Quartz，Windows 使用 Windows Ink / Synthetic Pointer。
 | 项目 | 当前实现 |
 | --- | --- |
 | Android 客户端 | 原生 Java，最低 Android 5.0 / API 21；已在 Note2 / Android 9 安装验证 |
-| macOS 宿主 | Swift，macOS 12+；原生 CLI、Quartz 输入、无输入诊断模式 |
-| Windows 宿主 | C++17，Windows 10 1809+；原生 CLI、Windows Ink 输入、无输入诊断模式 |
+| macOS 宿主 | Swift 核心 + SwiftUI，macOS 12+；桌面 UI、原生 CLI、Quartz 输入 |
+| Windows 宿主 | C++17 核心 + WinUI 3，Windows 10 1809+；桌面 UI、原生 CLI、Windows Ink 输入 |
 | iPad | 规划中的原生客户端；见 [iOS 接口规划](client/ios/README.md) |
 | 笔数据 | 坐标、压感、倾斜、悬停、橡皮擦、侧键；依赖设备与目标应用 |
-| 映射 | 绝对 / 相对模式、源区域、目标区域、旋转、压力曲线；macOS 另有自动等比映射 |
+| 映射 | 绝对 / 相对模式、源区域、目标区域、旋转、输出坐标级数；macOS 另有自动等比映射 |
+| 笔设置 | Gamma / 控制点压力曲线、倾斜开关与比例、多套 profile；UI/CLI 均可操作 |
 | 防抖 | Android 默认启用自适应坐标平滑；可关闭、校准、重新校准与删除校准 |
 | USB | ADB reverse，通过 USB 传输同一笔协议，需要 USB 调试授权 |
 | Wi-Fi | TCP，双向认证、逐帧校验、低延迟发送 |
@@ -35,7 +36,9 @@ macOS 使用 Quartz，Windows 使用 Windows Ink / Synthetic Pointer。
 
 准备 Python 3.9+、Android SDK Platform-Tools，以及各平台的构建工具。
 Android 编译需要 JDK 和 Android SDK；macOS 需要 Swift 工具链；
-Windows 需要 Visual Studio C++ 工具与 CMake。
+Windows 需要 Visual Studio C++ 工具与 CMake，桌面 UI 另需 .NET 10 SDK。
+macOS 桌面 UI 需要含 macOS 26 或更新 SDK 的 Xcode / Command Line Tools 构建；
+产物仍支持 macOS 12 起的系统。
 详细要求分别见 [Android](client/android/README.md)、
 [macOS](server/macos/README.md)、[Windows](server/windows/README.md)。
 
@@ -91,6 +94,23 @@ macOS 注入输入需要在“系统设置 → 隐私与安全性 → 辅助功�
 Ink 输入，完整性级别不同的应用另有系统限制。诊断连接成功并不代表这些系统
 权限或应用兼容性已经通过验证。
 
+## 桌面界面
+
+```bash
+python3 reflection build ui
+python3 reflection install ui
+python3 reflection ui
+```
+
+macOS 安装到当前用户的 `Applications/Reflection.app`；Windows 安装完整
+自包含应用到 `%LOCALAPPDATA%\Reflection\app`。构建产物可独立运行。
+界面提供启动/停止、连接配置、可编辑压感曲线、映射、profiles 和诊断，
+保存后可直接重启宿主应用新设置。macOS 26+ 使用系统 Liquid Glass，
+旧版回退到原生材质；Windows 在支持的 Win11 系统使用 Mica，否则回退到主题背景。
+
+界面与输入宿主是独立进程。CLI 与 UI 使用同一配置和控制接口，
+可以在没有窗口的情况下完成全部设置。详见平台 README 的运行和验证范围。
+
 ## 常用 CLI
 
 ```bash
@@ -131,6 +151,7 @@ python3 reflection test
 
 - [连接方式](docs/connectivity.md)：USB、Wi-Fi、蓝牙和排障。
 - [配置与 CLI](docs/configuration.md)：映射、配对、自动化和权限。
+- [笔设置与排障](docs/pen-settings.md)：压感曲线、profiles、分辨率含义、倾斜与橡皮擦。
 - [笔输入防抖与校准](docs/stabilization.md)：默认防抖、细节保留、可选校准与控制命令。
 - [兼容性与验证范围](docs/compatibility.md)：设备轴、宿主精度、应用边界。
 - [架构](docs/architecture.md)：模块职责、数据流和原生选型。
@@ -147,8 +168,8 @@ client/
   android/       Android 应用、采集核心和 CLI
   ios/           后续 iPad 客户端的接口规划
 server/
-  macos/         Swift 库、CLI、Quartz 和 RFCOMM 适配器
-  windows/       C++ 核心、CLI、Windows Ink 和 RFCOMM 适配器
+  macos/         Swift 核心、SwiftUI、CLI、Quartz 和 RFCOMM
+  windows/       C++ 核心、WinUI 3、CLI、Windows Ink 和 RFCOMM
 protocol/        共享协议规范与跨语言测试向量
 tools/           配对、安装、诊断和参考协议工具
 tests/           跨平台协议与工具测试

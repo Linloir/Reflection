@@ -26,6 +26,10 @@ public final class ControlReceiver extends BroadcastReceiver {
                 case "stabilization":
                     if (intent.hasExtra("enabled")) c.setStabilization(intent.getBooleanExtra("enabled", true));
                     break;
+                case "tilt":
+                    if (intent.hasExtra("mode")) c.setTiltMode(intent.getStringExtra("mode"));
+                    break;
+                case "tilt-reset": c.resetTiltDetection(); break;
                 case "calibration-start": c.startCalibration(); break;
                 case "calibration-finish": c.finishCalibration(); break;
                 case "calibration-cancel": c.cancelCalibration(); break;

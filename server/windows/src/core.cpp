@@ -21,6 +21,24 @@ void Mapping::validate() const {
         throw std::invalid_argument("rotation must be 0, 90, 180 or 270");
     if (!std::isfinite(pressure_gamma) || pressure_gamma < 0.1 || pressure_gamma > 10)
         throw std::invalid_argument("pressure_gamma must be in [0.1,10]");
+    if (!pressure_curve.empty()) {
+        if (pressure_curve.size() < 2 || pressure_curve.size() > 32 ||
+            pressure_curve.front() != std::make_pair(0.0, 0.0) ||
+            pressure_curve.back() != std::make_pair(1.0, 1.0))
+            throw std::invalid_argument("pressure_curve requires 2..32 knots from 0,0 to 1,1");
+        double previous_x = -1, previous_y = -1;
+        for (const auto& [x, y] : pressure_curve) {
+            if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1 ||
+                x <= previous_x || y < previous_y)
+                throw std::invalid_argument("pressure_curve inputs must increase and outputs must not decrease");
+            previous_x = x; previous_y = y;
+        }
+    }
+    for (const auto steps : {position_steps_x, position_steps_y})
+        if (steps != 0 && (steps < 2 || steps > 65536))
+            throw std::invalid_argument("position_steps must be 0 (native) or 2..65536");
+    if (!std::isfinite(tilt_scale) || tilt_scale < 0 || tilt_scale > 2)
+        throw std::invalid_argument("tilt_scale must be in [0,2]");
     if (!std::isfinite(sensitivity) || sensitivity <= 0 || sensitivity > 10)
         throw std::invalid_argument("sensitivity must be in (0,10]");
 }
@@ -62,7 +80,31 @@ MappedSample Mapper::map(const Sample& sample) {
     last_x_ = x; last_y_ = y;
     tracking_ = sample.phase != Phase::exit && sample.phase != Phase::cancel;
     const bool contact = sample.phase == Phase::down || sample.phase == Phase::move;
-    return {sample, cursor_x_, cursor_y_, contact ? std::pow(sample.pressure, mapping_.pressure_gamma) : 0, tx, ty};
+    double pressure = std::pow(sample.pressure, mapping_.pressure_gamma);
+    if (!mapping_.pressure_curve.empty()) {
+        const auto& points = mapping_.pressure_curve;
+        auto upper = std::upper_bound(points.begin(), points.end(), sample.pressure,
+            [](double p, const auto& knot) { return p < knot.first; });
+        if (upper == points.end()) pressure = 1;
+        else {
+            const auto& lower = *(upper - 1);
+            pressure = lower.second + (upper->second - lower.second) *
+                (sample.pressure - lower.first) / (upper->first - lower.first);
+        }
+    }
+    auto quantize = [](double value, double origin, double span, unsigned steps) {
+        if (!steps || span <= 0) return value;
+        return origin + std::round((value - origin) / span * (steps - 1)) / (steps - 1) * span;
+    };
+    // Keep the internal relative cursor continuous so small intentional motions accumulate.
+    auto source = sample;
+    source.tilt = source.tilt && mapping_.tilt_enabled;
+    tx = source.tilt ? std::clamp(tx * mapping_.tilt_scale, -90.0, 90.0) : 0;
+    ty = source.tilt ? std::clamp(ty * mapping_.tilt_scale, -90.0, 90.0) : 0;
+    return {source,
+        quantize(cursor_x_, mapping_.target.x, mapping_.target.width - 1, mapping_.position_steps_x),
+        quantize(cursor_y_, mapping_.target.y, mapping_.target.height - 1, mapping_.position_steps_y),
+        contact ? pressure : 0, tx, ty};
 }
 
 void validate_sample(const Sample& s) {

@@ -76,8 +76,71 @@ Android 控制 Receiver 受系统 `DUMP` 权限保护：普通第三方应用不
 防抖开关与校准保存在客户端，立即生效，不需要重启宿主。默认无需校准即可
 使用；校准步骤、质量检查与算法边界见 [防抖说明](stabilization.md)。
 
-宿主目前没有图形界面，因此所有已实现能力直接由 CLI 提供。后续 UI 应调用
-相同配置模型和控制核心；不应添加只有 UI 可用的隐藏配置。
+macOS 提供 SwiftUI 桌面界面，Windows 提供 WinUI 3 桌面界面。
+两端均支持连接状态、启动/停止、曲线、区域、倾斜、输出坐标级数和 profiles。
+macOS 界面直接复用 Swift 配置库；Windows 界面调用原生 CLI 的 JSON 控制接口。
+输入接收与注入运行在独立宿主中，绘制曲线和刷新面板不会进入笔事件队列。
+
+| 桌面操作 | 原生 CLI |
+| --- | --- |
+| 查看状态 / 停止 | `status` / `stop` |
+| 启动 / 无输入诊断模式 | `start` / `start --dry-run` |
+| 查看配置 / 校验 | `config show` / `config validate` |
+| 保存多个配置字段 | `config apply KEY VALUE ...` |
+| 保存 / 覆盖 profile | `profiles save NAME` / `profiles save NAME --replace` |
+| 列出 / 查看 profile | `profiles list` / `profiles show NAME` |
+| 加载 / 删除 profile | `profiles load NAME` / `profiles delete NAME` |
+| 显示器 / 权限诊断 | `displays` / `doctor` |
+
+## 压感曲线与配置档案
+
+Gamma 模式保留原行为；自定义曲线使用 2–32 个控制点，输入必须严格递增，
+输出不能下降，首尾固定为 `(0,0)`、`(1,1)`。控制点之间作线性插值。
+非空自定义曲线取代 Gamma，不会再叠加一次 Gamma。抬笔、悬停和取消始终输出零压力。
+
+macOS：
+
+```bash
+python3 reflection server config set mapping.pressureCurve '[{"input":0,"output":0},{"input":0.25,"output":0.45},{"input":0.75,"output":0.9},{"input":1,"output":1}]'
+python3 reflection server profiles save "Soft pencil"
+python3 reflection server profiles list
+python3 reflection server profiles load "Soft pencil"
+python3 reflection server config set mapping.pressureCurve '[]'
+```
+
+Windows（PowerShell）：
+
+```powershell
+python reflection server config set mapping.pressure_curve "0,0;0.25,0.45;0.75,0.9;1,1"
+python reflection server profiles save "Soft pencil"
+python reflection server profiles load "Soft pencil"
+python reflection server config set mapping.pressure_curve ""
+```
+
+profile 包含映射、压力、倾斜和坐标级数，不包含配对密钥、监听地址或端口。
+两端的 profile 文件格式不同，不能直接互换。保存同名 profile 默认拒绝覆盖；
+显式 `--replace` 才会替换。修改或加载 profile 后重新启动宿主生效。
+Android 防抖校准属于设备输入区，不放入桌面 profile。
+
+## 倾斜与输出坐标级数
+
+macOS 的 `mapping.tiltEnabled` / `mapping.tiltScale`，Windows 的
+`mapping.tilt_enabled` / `mapping.tilt_scale` 分别控制倾斜开关和 0–2 倍比例。
+这是对已收到角度的转换，不能修复设备本身的异常读数。
+
+`mapping.positionStepsX/Y`（macOS）或 `mapping.position_steps_x/y`（Windows）
+控制整个目标矩形每轴的输出坐标级数：`0` 保留原生精度，或设置为 `2..65536`。
+例如某轴设为 1024，位置会落在包含两端的 1024 个格点上。默认建议保持 `0`。
+相对模式在内部累积完整精度的位置，只在输出时量化，避免小位移反复被舍去。
+这不是设备的 LPI 或采样率设置，详细区别见 [笔设置说明](pen-settings.md)。
+
+```bash
+# macOS：同时配置两个轴，校验全部成功后才保存
+python3 reflection server config apply mapping.positionStepsX 4096 mapping.positionStepsY 4096
+python3 reflection server config set mapping.tiltEnabled false
+python3 reflection server stop
+python3 reflection server start
+```
 
 ## 安装与退出
 
@@ -90,6 +153,8 @@ python3 reflection install server
 安装位置稳定后再授予 macOS 辅助功能权限，可以减少因移动二进制而重新授权
 的情况。
 
-宿主以前台进程运行，`Ctrl-C` 触发输入释放和退出。当前没有自动安装
+CLI 启动的宿主以前台进程运行，`Ctrl-C` 或同一配置的 `server stop`
+触发输入释放和退出。`stop` 通过当前用户的专用控制通道识别宿主，不按状态文件
+中可能过期的 PID 杀进程。桌面 UI 同样使用此控制能力。当前没有自动安装
 LaunchAgent 或 Windows Service。需要自启动时，应由自己的进程管理工具
 运行同一个原生命令，并保留退出时释放输入的行为。

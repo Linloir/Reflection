@@ -7,6 +7,7 @@ javac --release 8 -Xlint:-options -d "$out" \
     "$project_dir/app/src/main/java/io/github/linloir/reflection/core/PenSample.java" \
     "$project_dir/app/src/main/java/io/github/linloir/reflection/core/PenStabilizer.java" \
     "$project_dir/app/src/main/java/io/github/linloir/reflection/core/CalibrationProfile.java" \
+    "$project_dir/app/src/main/java/io/github/linloir/reflection/core/TiltDecoder.java" \
     "$project_dir/app/src/main/java/io/github/linloir/reflection/core/Wire.java" \
     "$project_dir/app/src/main/java/io/github/linloir/reflection/transport/DuplexLink.java" \
     "$project_dir/app/src/main/java/io/github/linloir/reflection/transport/TcpLink.java" \
@@ -17,10 +18,12 @@ javac --release 8 -Xlint:-options -d "$out" \
     "$project_dir/tests/InputAdapterTest.java" \
     "$project_dir/tests/PenStabilizerTest.java" \
     "$project_dir/tests/CalibrationProfileTest.java" \
+    "$project_dir/tests/TiltDecoderTest.java" \
     "$project_dir/tests/TransportProbe.java" \
     "$project_dir/tests/CoreTest.java"
 java -cp "$out" CoreTest
 java -cp "$out" InputAdapterTest
 java -cp "$out" PenStabilizerTest
 java -cp "$out" CalibrationProfileTest
+java -cp "$out" TiltDecoderTest
 python3 "$project_dir/tests/transport_test.py"

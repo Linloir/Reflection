@@ -65,7 +65,8 @@ public:
         if (s.source.barrel) pen.pointerInfo.pointerFlags |= POINTER_FLAG_SECONDBUTTON;
         if (s.source.eraser) pen.penFlags |= PEN_FLAG_INVERTED | PEN_FLAG_ERASER;
         if (s.source.barrel) pen.penFlags |= PEN_FLAG_BARREL;
-        pen.penMask = PEN_MASK_PRESSURE | PEN_MASK_TILT_X | PEN_MASK_TILT_Y;
+        pen.penMask = PEN_MASK_PRESSURE;
+        if (s.source.tilt) pen.penMask |= PEN_MASK_TILT_X | PEN_MASK_TILT_Y;
         pen.pressure = static_cast<UINT32>(std::llround(s.pressure * 1024));
         pen.tiltX = static_cast<INT32>(std::llround(s.tilt_x));
         pen.tiltY = static_cast<INT32>(std::llround(s.tilt_y));

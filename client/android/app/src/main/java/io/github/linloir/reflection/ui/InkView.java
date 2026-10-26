@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.os.Build;
 import android.view.MotionEvent;
 import android.view.View;
 import io.github.linloir.reflection.control.Controller;
@@ -23,6 +24,7 @@ public final class InkView extends View {
     private boolean stroke;
     private boolean calibrationMarker, displayedCalibration;
     private int clearGeneration;
+    private long tiltRevision = -1;
 
     public InkView(Context context, Controller controller) {
         super(context); this.controller = controller;
@@ -54,13 +56,21 @@ public final class InkView extends View {
     }
     @Override public boolean onTouchEvent(MotionEvent event) {
         updateGeometry();
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) requestUnbufferedDispatch(event);
-        input.onEvent(event, getWidth(), getHeight());
+        if (Build.VERSION.SDK_INT >= 30 && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            int tool = event.getToolType(event.getActionIndex());
+            // Older ViewRootImpl can strand pending batches when switching to unbuffered input.
+            // Keep frame batching there; PenInput still consumes every historical sample.
+            if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER)
+                requestUnbufferedDispatch(event);
+        }
+        refreshTiltSettings();
+        input.onEvent(event, getWidth(), getHeight(), displayRotation());
         return true;
     }
     @Override public boolean onGenericMotionEvent(MotionEvent event) {
         updateGeometry();
-        return input.onEvent(event, getWidth(), getHeight()) || super.onGenericMotionEvent(event);
+        refreshTiltSettings();
+        return input.onEvent(event, getWidth(), getHeight(), displayRotation()) || super.onGenericMotionEvent(event);
     }
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
@@ -95,12 +105,20 @@ public final class InkView extends View {
     }
     public void refreshSettings() {
         updateGeometry();
+        refreshTiltSettings();
         if (displayedCalibration != controller.calibrating()) {
             displayedCalibration = controller.calibrating(); calibrationMarker = false; stroke = false; invalidate();
         }
         if (clearGeneration != controller.clearGeneration()) {
             clearGeneration = controller.clearGeneration(); if (ink != null) ink.drawColor(Color.WHITE); invalidate();
         }
+    }
+    private int displayRotation() { return getDisplay() == null ? 0 : getDisplay().getRotation(); }
+    private void refreshTiltSettings() {
+        if (tiltRevision == controller.tiltRevision()) return;
+        input.setTiltMode(controller.tiltMode());
+        input.resetTiltDetection();
+        tiltRevision = controller.tiltRevision();
     }
     public void updateGeometry() {
         if (getDisplay() != null && controller.setInputGeometry(getWidth(), getHeight(), getDisplay().getRotation())) {

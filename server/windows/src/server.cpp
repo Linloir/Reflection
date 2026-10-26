@@ -157,6 +157,7 @@ void session(SOCKET socket, const Config& config, bool dry_run, const std::atomi
     SequenceGuard guard;
     ContactGuard contact_guard;
     uint64_t count = 0;
+    auto last_status = Clock::now();
     bool capabilities_seen = false;
     if (events) events({"connected", "", 0, 0, dry_run, {}});
     while (running.load()) {
@@ -173,6 +174,10 @@ void session(SOCKET socket, const Config& config, bool dry_run, const std::atomi
             const auto mapped = mapper.map(sample);
             backend->submit(mapped);
             ++count;
+            if (events && Clock::now() - last_status >= std::chrono::milliseconds(500)) {
+                events({"samples", "", count, 0, dry_run, {}});
+                last_status = Clock::now();
+            }
             if (events && dry_run && sample.phase != Phase::move && sample.phase != Phase::hover)
                 events({"pen", "", count, 0, true, mapped});
         } else if (body[1] == 0x11) {

@@ -138,9 +138,19 @@ public final class CoordinateMapper {
         }
         lastNormalized = (sample.phase == .leave || sample.phase == .cancel) ? nil : normalized
         let pressure = sample.phase == .down || sample.phase == .move
-            ? pow(clamp(sample.pressure), configuration.pressureGamma) : 0
-        return MappedSample(sample: sample, point: cursor, pressure: pressure, tiltX: tiltX, tiltY: tiltY)
+            ? configuration.mapPressure(sample.pressure) : 0
+        let output = CGPoint(
+            x: quantize(cursor.x, origin: target.x, span: target.width - 1, steps: configuration.positionStepsX),
+            y: quantize(cursor.y, origin: target.y, span: target.height - 1, steps: configuration.positionStepsY))
+        tiltX = configuration.tiltEnabled ? max(-90, min(90, tiltX * configuration.tiltScale)) : 0
+        tiltY = configuration.tiltEnabled ? max(-90, min(90, tiltY * configuration.tiltScale)) : 0
+        return MappedSample(sample: sample, point: output, pressure: pressure, tiltX: tiltX, tiltY: tiltY)
     }
+}
+
+private func quantize(_ value: Double, origin: Double, span: Double, steps: Int) -> Double {
+    guard steps >= 2, span > 0 else { return value }
+    return origin + (((value - origin) / span) * Double(steps - 1)).rounded() / Double(steps - 1) * span
 }
 
 private func clamp(_ value: Double) -> Double { min(1, max(0, value)) }

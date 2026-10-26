@@ -4,6 +4,8 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <fstream>
+#include <chrono>
 
 using namespace reflection;
 
@@ -50,11 +52,29 @@ int main() {
         mapping.pressure_gamma = 2;
         Mapper rotated(mapping);
         sample.x = 0.25; sample.y = 0.75; sample.phase = Phase::down;
-        sample.tilt_x = 30; sample.tilt_y = -20;
+        sample.tilt = true; sample.tilt_x = 30; sample.tilt_y = -20;
         p = rotated.map(sample);
         require(near(p.x, -1920) && near(p.y, 0), "cropped rotated corner");
         require(near(p.tilt_x, 20) && near(p.tilt_y, 30), "rotate tilt with coordinates");
         require(near(p.pressure, 0.25), "gamma pressure");
+        mapping.pressure_curve = {{0,0},{0.25,0.1},{0.75,0.9},{1,1}};
+        sample.pressure = 0.5;
+        require(near(Mapper(mapping).map(sample).pressure, 0.5), "custom curve overrides gamma");
+        sample.pressure = 0.25;
+        require(near(Mapper(mapping).map(sample).pressure, 0.1), "curve reaches exact knot");
+        sample.pressure = 0;
+        require(Mapper(mapping).map(sample).pressure == 0, "custom curve zero boundary");
+        sample.pressure = 1;
+        require(Mapper(mapping).map(sample).pressure == 1, "custom curve full pressure boundary");
+        mapping.tilt_scale = 2;
+        require(near(Mapper(mapping).map(sample).tilt_y, 60), "tilt sensitivity after rotation");
+        mapping.tilt_enabled = false;
+        p = Mapper(mapping).map(sample);
+        require(!p.source.tilt && p.tilt_x == 0 && p.tilt_y == 0, "disable tilt capability and values");
+        mapping.pressure_curve[2].second = 0;
+        reject([&] { mapping.validate(); }, "reject decreasing curve");
+        mapping.pressure_curve = {{0,0},{0,0.5},{1,1}};
+        reject([&] { mapping.validate(); }, "reject duplicate curve inputs");
 
         mapping = Mapping{}; mapping.target = {0, 0, 1001, 1001}; mapping.relative = true;
         Mapper relative(mapping);
@@ -69,6 +89,23 @@ int main() {
         require(near(relative.map(sample).x, 200), "relative reentry does not jump");
         sample.x = 1;
         require(near(relative.map(sample).x, 1000), "relative clamps target");
+        mapping.position_steps_x = 11;
+        Mapper quantized(mapping);
+        quantized.seed(100, 100);
+        sample.x = 0; sample.phase = Phase::hover;
+        quantized.map(sample);
+        for (int i = 1; i <= 6; ++i) {
+            sample.x = i * 0.01;
+            p = quantized.map(sample);
+        }
+        require(near(p.x, 200), "quantized relative mapping preserves sub-step accumulated movement");
+        mapping.relative = false;
+        sample.x = 0.251;
+        require(near(Mapper(mapping).map(sample).x, 300), "coordinate step quantization");
+        sample.x = 1;
+        require(near(Mapper(mapping).map(sample).x, 1000), "quantized inclusive endpoint");
+        mapping.position_steps_y = 1;
+        reject([&] { mapping.validate(); }, "reject invalid position steps");
 
         sample.x = std::numeric_limits<double>::quiet_NaN();
         reject([&] { mapper.map(sample); }, "reject NaN before OS conversion");
@@ -143,7 +180,62 @@ int main() {
         reject([&] { set_config(config, "mapping.source", "0,0,1,1,"); }, "reject malformed crop");
         reject([&] { set_config(config, "unknown", "1"); }, "reject unknown config key");
         require(config_values(config, false).at("token") == "<redacted>", "redact token by default");
+        const auto revision = config_revision(config);
+        auto changed = config;
+        changed.token = std::string(64, 'b');
+        require(config_revision(changed) != revision, "configuration revision detects hidden credential changes");
+        changed = config; changed.mapping.pressure_gamma = 0.9;
+        require(config_revision(changed) != revision && config_revision(config) == revision,
+                "configuration revision is stable and detects mapping changes");
         require(json_escape("a\n\"") == "\"a\\u000a\\\"\"", "safe JSON diagnostics");
+        set_config(config, "mapping.pressure_curve", "0,0;0.5,0.25;1,1");
+        set_config(config, "mapping.position_steps_x", "4096");
+        set_config(config, "mapping.tilt_enabled", "false");
+        set_config(config, "mapping.tilt_scale", "0.5");
+        config.validate();
+        require(config_values(config, false).at("mapping.pressure_curve") == "0,0;0.5,0.25;1,1",
+                "curve text round-trip");
+        reject([&] { set_config(config, "mapping.pressure_curve", "0,0;1,1;"); }, "reject trailing empty knot");
+        reject([&] { set_config(config, "mapping.position_steps_x", "4096.5"); }, "reject fractional steps");
+        reject([&] { set_config(config, "mapping.tilt_enabled", "yes"); }, "reject invalid boolean");
+        const auto directory = std::filesystem::temp_directory_path() /
+            ("reflection-profiles-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct Cleanup {
+            std::filesystem::path path;
+            ~Cleanup() { std::error_code error; std::filesystem::remove_all(path, error); }
+        } cleanup{directory};
+        const auto path = directory / "server.conf";
+        save_config(config, path);
+        auto restored = load_config(path);
+        require(restored.mapping.pressure_curve == config.mapping.pressure_curve &&
+                restored.mapping.position_steps_x == 4096 && !restored.mapping.tilt_enabled,
+                "full configuration persistence");
+        save_profile(config, path, "Drawing");
+        require(list_profiles(path) == std::vector<std::string>{"Drawing"}, "profile listing");
+        reject([&] { save_profile(config, path, "Drawing"); }, "profile overwrite requires explicit replace");
+        reject([&] { save_profile(config, path, "../secret"); }, "profile traversal rejected");
+        std::ifstream profile_file(directory / "server.conf.profiles" / "profile-Drawing.conf");
+        const std::string profile_text((std::istreambuf_iterator<char>(profile_file)), {});
+        require(profile_text.find("token") == std::string::npos && profile_text.find("bind") == std::string::npos,
+                "profiles never store pairing credentials or transport");
+        config.token = std::string(64, 'b'); config.bind = "0.0.0.0";
+        config.mapping.pressure_curve.clear(); config.mapping.position_steps_x = 0;
+        restored = load_profile(config, path, "Drawing");
+        require(restored.mapping.position_steps_x == 4096 && restored.token == config.token &&
+                restored.bind == "0.0.0.0", "profile load restores mapping while preserving connection");
+        save_profile(config, path, "Drawing", true);
+        require(load_profile(config, path, "Drawing").mapping.pressure_curve.empty(), "explicit profile replacement");
+        config.mapping.pressure_curve = {{0,0},{0.5,0.2},{0.5000000000000001,0.8},{1,1}};
+        save_config(config, path);
+        require(load_config(path).mapping.pressure_curve == config.mapping.pressure_curve,
+                "persistence preserves adjacent representable curve inputs");
+        {
+            std::ofstream malformed(directory / "server.conf.profiles" / "profile-Invalid.conf");
+            malformed << "token=" << config.token << '\n';
+        }
+        reject([&] { load_profile(config, path, "Invalid"); }, "reject secret injection through profile");
+        delete_profile(path, "Drawing");
+        reject([&] { load_profile(config, path, "Drawing"); }, "deleted profile cannot load");
         std::cout << checks << " core checks passed\n";
         return 0;
     } catch (const std::exception& error) {

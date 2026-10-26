@@ -1,0 +1,138 @@
+<Window
+    x:Class="Reflection.Desktop.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Reflection">
+  <Grid x:Name="Root" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+    <Grid Padding="28,24,28,16" ColumnSpacing="24">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+      <StackPanel Spacing="3">
+        <TextBlock Text="Reflection" Style="{ThemeResource TitleTextBlockStyle}" />
+        <TextBlock Text="Tablet input for Windows" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+      </StackPanel>
+      <Button Grid.Column="1" Content="Refresh" Click="Refresh_Click" VerticalAlignment="Center" />
+    </Grid>
+    <Grid Grid.Row="1" ColumnSpacing="24" Padding="28,0,28,24">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="235" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+      <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="18">
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" CornerRadius="8" Padding="16">
+            <StackPanel Spacing="10">
+              <TextBlock Text="INPUT HOST" FontSize="12" FontWeight="SemiBold" />
+              <TextBlock x:Name="StatusText" Text="Loading..." Style="{ThemeResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
+              <TextBlock x:Name="StatusDetail" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              <CheckBox x:Name="DryRun" Content="Dry run (no input)" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="StartButton" Content="Start" Style="{ThemeResource AccentButtonStyle}" Click="Start_Click" />
+                <Button x:Name="StopButton" Content="Stop" Click="Stop_Click" />
+              </StackPanel>
+              <Button Content="Restart with saved settings" Click="Restart_Click" />
+              <TextBlock Text="Closing this window stops a host started here. Hosts started in a terminal keep running."
+                         FontSize="12" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+          <StackPanel Spacing="10">
+            <TextBlock Text="Profiles" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <ComboBox x:Name="Profiles" PlaceholderText="Saved mapping profiles" HorizontalAlignment="Stretch" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Content="Load" Click="LoadProfile_Click" />
+              <Button Content="Delete" Click="DeleteProfile_Click" />
+            </StackPanel>
+            <TextBox x:Name="ProfileName" Header="Profile name" PlaceholderText="Drawing" MaxLength="64" />
+            <CheckBox x:Name="ReplaceProfile" Content="Replace existing profile" />
+            <Button Content="Save current settings as profile" Click="SaveProfile_Click" />
+            <TextBlock Text="Profiles contain mapping and pen settings. Connection credentials stay separate."
+                       FontSize="12" TextWrapping="Wrap" />
+          </StackPanel>
+          <Button Content="Check input APIs" Click="Doctor_Click" />
+        </StackPanel>
+      </ScrollViewer>
+      <Grid Grid.Column="1" RowSpacing="12">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <InfoBar x:Name="Notice" IsOpen="False" IsClosable="True" />
+        <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel x:Name="Settings" Spacing="20">
+            <Expander Header="Pressure response" IsExpanded="True" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch">
+              <StackPanel Spacing="12">
+                <ComboBox x:Name="PressureMode" Header="Curve mode" SelectionChanged="CurveChanged" SelectedIndex="0">
+                  <ComboBoxItem Content="Gamma" /><ComboBoxItem Content="Custom points" />
+                </ComboBox>
+                <NumberBox x:Name="Gamma" Header="Gamma (0.1-10)" Minimum="0.1" Maximum="10" Value="1"
+                           SmallChange="0.1" SpinButtonPlacementMode="Inline" ValueChanged="GammaChanged" />
+                <TextBox x:Name="CurvePoints" Header="Custom input,output points" Text="0,0;0.25,0.1;0.75,0.9;1,1"
+                         TextChanged="CurveTextChanged" PlaceholderText="0,0;0.5,0.25;1,1" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <Button Content="Soft" Tag="0.65" Click="Preset_Click" />
+                  <Button Content="Linear" Tag="1" Click="Preset_Click" />
+                  <Button Content="Firm" Tag="1.6" Click="Preset_Click" />
+                </StackPanel>
+                <Border Background="{ThemeResource ControlFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                  <StackPanel Spacing="6">
+                    <TextBlock Text="Output pressure" FontSize="12" />
+                    <Canvas x:Name="CurveCanvas" Height="150" SizeChanged="CurveSizeChanged"
+                            PointerPressed="CurvePointerPressed" PointerMoved="CurvePointerMoved"
+                            PointerReleased="CurvePointerReleased" PointerCanceled="CurvePointerReleased"
+                            PointerCaptureLost="CurveCaptureLost" Background="Transparent" />
+                    <TextBlock Text="Input pressure - drag interior points in custom mode" FontSize="12" />
+                  </StackPanel>
+                </Border>
+                <TextBlock x:Name="CurveValidation" TextWrapping="Wrap" FontSize="12" />
+              </StackPanel>
+            </Expander>
+            <Expander Header="Mapping, tilt and coordinate resolution" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch">
+              <StackPanel Spacing="12">
+                <ComboBox x:Name="MappingMode" Header="Mapping mode" SelectedIndex="0">
+                  <ComboBoxItem Content="absolute" /><ComboBoxItem Content="relative" />
+                </ComboBox>
+                <TextBox x:Name="Source" Header="Tablet region (normalized x,y,width,height)" />
+                <TextBox x:Name="Target" Header="Desktop target (desktop or x,y,width,height in physical pixels)" />
+                <ComboBox x:Name="Displays" Header="Choose a display" SelectionChanged="DisplayChanged" />
+                <ComboBox x:Name="Rotation" Header="Rotation" SelectedIndex="0">
+                  <ComboBoxItem Content="0" /><ComboBoxItem Content="90" />
+                  <ComboBoxItem Content="180" /><ComboBoxItem Content="270" />
+                </ComboBox>
+                <NumberBox x:Name="Sensitivity" Header="Relative motion sensitivity" Minimum="0.01" Maximum="10"
+                           Value="1" SmallChange="0.1" SpinButtonPlacementMode="Inline" />
+                <ToggleSwitch x:Name="TiltEnabled" Header="Tilt" IsOn="True" />
+                <NumberBox x:Name="TiltScale" Header="Tilt scale (0-2)" Minimum="0" Maximum="2" Value="1"
+                           SmallChange="0.1" SpinButtonPlacementMode="Inline" />
+                <Grid ColumnSpacing="12">
+                  <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition /></Grid.ColumnDefinitions>
+                  <NumberBox x:Name="StepsX" Header="X coordinate steps" Minimum="0" Maximum="65536" Value="0" />
+                  <NumberBox x:Name="StepsY" Header="Y coordinate steps" Minimum="0" Maximum="65536" Value="0" Grid.Column="1" />
+                </Grid>
+                <TextBlock Text="0 uses native coordinates. 2-65536 quantizes the mapped range. This does not increase hardware LPI, sampling rate or Windows Ink pressure levels."
+                           TextWrapping="Wrap" FontSize="12" />
+              </StackPanel>
+            </Expander>
+            <Expander Header="Connection and pairing" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+              <StackPanel Spacing="12">
+                <ComboBox x:Name="Transport" Header="Transport" SelectedIndex="0">
+                  <ComboBoxItem Content="tcp" /><ComboBoxItem Content="bluetooth" />
+                </ComboBox>
+                <TextBox x:Name="Bind" Header="TCP bind IPv4 address" />
+                <NumberBox x:Name="Port" Header="TCP port" Minimum="1" Maximum="65535" Value="24819" />
+                <PasswordBox x:Name="Token" Header="Pairing key (leave blank to keep current)" PasswordRevealMode="Hidden" />
+                <Button Content="Copy pairing key" Click="Pairing_Click" />
+                <TextBlock Text="USB: use adb reverse tcp:24819 tcp:24819 with 127.0.0.1. Wi-Fi: bind to your LAN IPv4 address. Bluetooth: pair both devices in system settings first."
+                           TextWrapping="Wrap" FontSize="12" />
+              </StackPanel>
+            </Expander>
+            <Expander Header="Session log" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+              <TextBox x:Name="Log" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                       MaxHeight="240" FontFamily="Consolas" FontSize="12" />
+            </Expander>
+          </StackPanel>
+        </ScrollViewer>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="12">
+          <Button Content="Save settings" Style="{ThemeResource AccentButtonStyle}" Click="Save_Click" />
+          <Button Content="Save and restart" Click="SaveRestart_Click" />
+          <TextBlock Text="Changes apply on the next host start." VerticalAlignment="Center" FontSize="12" />
+        </StackPanel>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>

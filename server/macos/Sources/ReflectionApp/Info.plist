@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.linloir.reflection.desktop</string>
+    <key>CFBundleName</key>
+    <string>Reflection</string>
+    <key>CFBundleDisplayName</key>
+    <string>Reflection</string>
+    <key>CFBundleExecutable</key>
+    <string>Reflection</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2.0</string>
+    <key>CFBundleVersion</key>
+    <string>2</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Reflection receives pen input from your paired tablet over Bluetooth.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Reflection receives pen input from your tablet over your local network.</string>
+</dict>
+</plist>

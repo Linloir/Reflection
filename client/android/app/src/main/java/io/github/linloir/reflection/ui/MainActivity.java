@@ -1,6 +1,7 @@
 package io.github.linloir.reflection.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -14,9 +15,12 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 import io.github.linloir.reflection.control.Controller;
+import io.github.linloir.reflection.input.PenInput;
 
 /** Deliberately small diagnostic UI over the same controller as the CLI. */
 public final class MainActivity extends Activity {
@@ -25,6 +29,8 @@ public final class MainActivity extends Activity {
     private EditText host, port, token, bluetoothAddress;
     private TextView status;
     private CheckBox preview, bluetooth, stabilization;
+    private RadioGroup tiltModes;
+    private TextView tiltDiagnostics;
     private long displayedConfigurationRevision;
     private final Handler handler = new Handler();
     private final Runnable update = new Runnable() {
@@ -35,6 +41,7 @@ public final class MainActivity extends Activity {
             if (preview.isChecked() != controller.preview()) { preview.setChecked(controller.preview()); ink.invalidate(); }
             if (stabilization.isChecked() != controller.stabilizationEnabled())
                 stabilization.setChecked(controller.stabilizationEnabled());
+            refreshTiltDialog();
             ink.refreshSettings(); handler.postDelayed(this, 1000);
         }
     };
@@ -67,6 +74,7 @@ public final class MainActivity extends Activity {
         });
         button(controls, "Disconnect", v -> { ink.cancelInput(); controller.disconnect(); });
         button(controls, "Clear", v -> { controller.clearPreview(); ink.refreshSettings(); });
+        button(controls, "Tilt", v -> showTiltSettings());
         root.addView(controls);
         preview = new CheckBox(this); preview.setText("Local preview (standard Android rendering)"); preview.setChecked(controller.preview());
         preview.setOnCheckedChangeListener((button, checked) -> { controller.setPreview(checked); if (ink != null) ink.invalidate(); }); root.addView(preview);
@@ -100,6 +108,48 @@ public final class MainActivity extends Activity {
         bluetooth.setChecked("bluetooth".equals(controller.mode()));
         bluetoothAddress.setText(controller.bluetoothAddress());
         displayedConfigurationRevision = controller.configurationRevision();
+    }
+    private void showTiltSettings() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(20), dp(8), dp(20), 0);
+        TextView explanation = new TextView(this);
+        explanation.setText("Auto recognizes supported device quirks. Standard uses Android angles directly. "
+            + "Recovery may provide only one tilt axis; the other axis stays unavailable.");
+        content.addView(explanation);
+        tiltModes = new RadioGroup(this);
+        String[] labels = {"Auto (recommended)", "Standard Android", "Off"};
+        for (int i = 0; i < labels.length; i++) {
+            RadioButton option = new RadioButton(this); option.setId(i + 1); option.setText(labels[i]);
+            tiltModes.addView(option);
+        }
+        content.addView(tiltModes);
+        tiltDiagnostics = new TextView(this); tiltDiagnostics.setTextSize(12); content.addView(tiltDiagnostics);
+        refreshTiltDialog();
+        tiltModes.setOnCheckedChangeListener((group, checked) -> {
+            String mode = checked == 1 ? "auto" : checked == 2 ? "standard" : "off";
+            try { controller.setTiltMode(mode); ink.refreshSettings(); }
+            catch (Exception e) { Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show(); }
+            refreshTiltDialog();
+        });
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Pen tilt").setView(content)
+            .setNeutralButton("Retry detection", (d, which) -> {
+                controller.resetTiltDetection(); ink.refreshSettings();
+            }).setPositiveButton("Close", null).create();
+        dialog.setOnDismissListener(d -> { tiltModes = null; tiltDiagnostics = null; });
+        dialog.show();
+    }
+    private void refreshTiltDialog() {
+        if (tiltModes == null || tiltDiagnostics == null) return;
+        String mode = controller.tiltMode();
+        int selected = "auto".equals(mode) ? 1 : "standard".equals(mode) ? 2 : 3;
+        if (tiltModes.getCheckedRadioButtonId() != selected) tiltModes.check(selected);
+        String text = "Last sample: " + PenInput.tiltStatus()
+            + "\nUsable axes: " + PenInput.tiltAxes() + " | recovered samples: " + PenInput.recoveredTiltSamples()
+            + "\nDevice: " + PenInput.lastDeviceName();
+        if (PenInput.tiltAxes() == 1)
+            text += "\nRecovered angle: " + PenInput.recoveredTiltDegrees()
+                + " deg | input rotation: " + PenInput.tiltInputRotation();
+        if (!text.contentEquals(tiltDiagnostics.getText())) tiltDiagnostics.setText(text);
     }
     @Override protected void onResume() { super.onResume(); handler.post(update); }
     @Override protected void onPause() {

@@ -42,6 +42,7 @@ public final class Controller {
     private long received;
     private int clearGeneration;
     private volatile long configurationRevision;
+    private volatile long tiltRevision;
 
     private Controller(Context context) {
         this.context = context;
@@ -70,6 +71,17 @@ public final class Controller {
     public int clearGeneration() { return clearGeneration; }
     public void setPreview(boolean enabled) { prefs.edit().putBoolean("preview", enabled).apply(); }
     public void clearPreview() { clearGeneration++; }
+    public String tiltMode() { return prefs.getString("tiltMode", "auto"); }
+    public long tiltRevision() { return tiltRevision; }
+    public synchronized void setTiltMode(String mode) {
+        if (!"auto".equals(mode) && !"standard".equals(mode) && !"off".equals(mode))
+            throw new IllegalArgumentException("Tilt mode must be auto, standard or off");
+        if (mode.equals(tiltMode())) return;
+        if (!prefs.edit().putString("tiltMode", mode).commit())
+            throw new IllegalStateException("Could not save tilt mode");
+        tiltRevision++;
+    }
+    public synchronized void resetTiltDetection() { tiltRevision++; }
 
     public synchronized boolean stabilizationEnabled() { return stabilizer.enabled(); }
     public synchronized boolean calibrating() { return calibrator != null; }
@@ -234,6 +246,14 @@ public final class Controller {
             .put("rttMicros", t == null ? 0 : t.rttMicros())
             .put("invalidTiltSamples", PenInput.invalidTiltSamples()).put("tiltReliable", PenInput.tiltReliable())
             .put("lastRawTilt", safeFloat(PenInput.lastRawTilt())).put("lastRawOrientation", safeFloat(PenInput.lastRawOrientation()))
+            .put("tiltStatus", PenInput.tiltStatus()).put("suppressedTiltSamples", PenInput.suppressedTiltSamples())
+            .put("tiltMode", tiltMode()).put("recoveredTiltSamples", PenInput.recoveredTiltSamples())
+            .put("tiltAxes", PenInput.tiltAxes()).put("tiltInputRotation", PenInput.tiltInputRotation())
+            .put("recoveredTiltDegrees", safeFloat(PenInput.recoveredTiltDegrees()))
+            .put("eraserSamples", PenInput.eraserSamples()).put("barrelButtonSamples", PenInput.barrelButtonSamples())
+            .put("lastRawToolType", PenInput.lastRawToolType()).put("lastRawButtons", PenInput.lastRawButtons())
+            .put("inputDevice", new JSONObject().put("id", PenInput.lastDeviceId()).put("name", PenInput.lastDeviceName())
+                .put("vendorId", PenInput.lastDeviceVendor()).put("productId", PenInput.lastDeviceProduct()).put("source", PenInput.lastSource()))
             .put("stabilization", stabilizationStatus());
         PenSample p = latest;
         if (p != null) o.put("lastSample", new JSONObject().put("x", p.x).put("y", p.y).put("pressure", p.pressure)

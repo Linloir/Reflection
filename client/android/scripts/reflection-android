@@ -26,6 +26,8 @@ stabilization = sub.add_parser('stabilization', help='Configure adaptive pen sta
 stabilization.add_argument('state', choices=['on', 'off', 'status'], nargs='?', default='status')
 calibration = sub.add_parser('calibration', help='Manage the stationary pen noise calibration')
 calibration.add_argument('action', choices=['start', 'finish', 'cancel', 'reset'])
+tilt = sub.add_parser('tilt', help='Configure tilt capture and compatible device recovery')
+tilt.add_argument('mode', choices=['auto', 'standard', 'off', 'status', 'reset'], nargs='?', default='status')
 args = parser.parse_args()
 adb = ['adb'] + (['-s', args.serial] if args.serial else [])
 package = 'io.github.linloir.reflection'
@@ -37,6 +39,8 @@ elif args.command == 'grant-bluetooth':
     command = adb + ['shell', 'pm', 'grant', package, 'android.permission.BLUETOOTH_CONNECT']
 else:
     action = 'calibration-' + args.action if args.command == 'calibration' else args.command
+    if args.command == 'tilt' and args.mode == 'reset':
+        action = 'tilt-reset'
     command = adb + ['shell', 'am', 'broadcast', '-n', package + '/.control.ControlReceiver', '--es', 'command', action]
     if args.command == 'configure':
         for key in ('host', 'mode', 'bluetooth'):
@@ -58,6 +62,8 @@ else:
         command += ['--ez', 'enabled', str(args.state == 'on').lower()]
     elif args.command == 'stabilization' and args.state != 'status':
         command += ['--ez', 'enabled', str(args.state == 'on').lower()]
+    elif args.command == 'tilt' and args.mode not in ('status', 'reset'):
+        command += ['--es', 'mode', args.mode]
 result = subprocess.run(command, capture_output=True, text=True)
 # `am broadcast` echoes extras on some Android releases: scrub the token defensively.
 output = result.stdout + result.stderr

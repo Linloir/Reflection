@@ -1,6 +1,9 @@
 #include "reflection/config.hpp"
 #include <fstream>
+#include <chrono>
+#include <atomic>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #ifdef _WIN32
 #include <windows.h>
@@ -17,7 +20,7 @@ static double number(const std::string& value) {
 
 static std::string text(double n) {
     std::ostringstream s;
-    s << std::setprecision(12) << n;
+    s << std::setprecision(std::numeric_limits<double>::max_digits10) << n;
     return s.str();
 }
 
@@ -33,6 +36,15 @@ static Rect rectangle(const std::string& text) {
 
 static std::string rect_text(const Rect& rect) {
     return text(rect.x) + "," + text(rect.y) + "," + text(rect.width) + "," + text(rect.height);
+}
+
+static std::string curve_text(const Mapping& mapping) {
+    std::string result;
+    for (const auto& [x, y] : mapping.pressure_curve) {
+        if (!result.empty()) result += ';';
+        result += text(x) + ',' + text(y);
+    }
+    return result;
 }
 
 void Config::validate() const {
@@ -55,8 +67,26 @@ std::map<std::string, std::string> config_values(const Config& c, bool secrets) 
         {"mapping.target", c.target_virtual_desktop ? "desktop" : rect_text(c.mapping.target)},
         {"mapping.rotation", std::to_string(c.mapping.rotation)},
         {"mapping.pressure_gamma", text(c.mapping.pressure_gamma)},
+        {"mapping.pressure_curve", curve_text(c.mapping)},
+        {"mapping.position_steps_x", std::to_string(c.mapping.position_steps_x)},
+        {"mapping.position_steps_y", std::to_string(c.mapping.position_steps_y)},
+        {"mapping.tilt_enabled", c.mapping.tilt_enabled ? "true" : "false"},
+        {"mapping.tilt_scale", text(c.mapping.tilt_scale)},
         {"mapping.sensitivity", text(c.mapping.sensitivity)}
     };
+}
+
+std::string config_revision(const Config& config) {
+    uint64_t value = 14695981039346656037ull;
+    for (const auto& [key, text] : config_values(config, true)) {
+        for (unsigned char ch : key + '=' + text + '\n') {
+            value ^= ch;
+            value *= 1099511628211ull;
+        }
+    }
+    std::ostringstream result;
+    result << std::hex << std::setw(16) << std::setfill('0') << value;
+    return result.str();
 }
 
 void set_config(Config& c, const std::string& key, const std::string& value) {
@@ -79,6 +109,28 @@ void set_config(Config& c, const std::string& key, const std::string& value) {
         if (n != 0 && n != 90 && n != 180 && n != 270) throw std::invalid_argument("invalid rotation");
         c.mapping.rotation = static_cast<unsigned>(n);
     } else if (key == "mapping.pressure_gamma") c.mapping.pressure_gamma = number(value);
+    else if (key == "mapping.pressure_curve") {
+        std::vector<std::pair<double, double>> points;
+        std::istringstream stream(value);
+        std::string knot;
+        if (!value.empty() && value.back() == ';') throw std::invalid_argument("invalid pressure curve");
+        while (std::getline(stream, knot, ';')) {
+            const auto comma = knot.find(',');
+            if (comma == std::string::npos) throw std::invalid_argument("curve knots require input,output");
+            points.emplace_back(number(knot.substr(0, comma)), number(knot.substr(comma + 1)));
+            if (points.size() > 32) throw std::invalid_argument("too many pressure curve knots");
+        }
+        c.mapping.pressure_curve = std::move(points);
+    } else if (key == "mapping.position_steps_x" || key == "mapping.position_steps_y") {
+        const auto n = number(value);
+        if (n != std::floor(n) || (n != 0 && (n < 2 || n > 65536)))
+            throw std::invalid_argument("position_steps must be 0 or 2..65536");
+        (key == "mapping.position_steps_x" ? c.mapping.position_steps_x : c.mapping.position_steps_y)
+            = static_cast<unsigned>(n);
+    } else if (key == "mapping.tilt_enabled") {
+        if (value != "true" && value != "false") throw std::invalid_argument("tilt_enabled requires true or false");
+        c.mapping.tilt_enabled = value == "true";
+    } else if (key == "mapping.tilt_scale") c.mapping.tilt_scale = number(value);
     else if (key == "mapping.sensitivity") c.mapping.sensitivity = number(value);
     else throw std::invalid_argument("unknown configuration key: " + key);
 }
@@ -103,23 +155,104 @@ Config load_config(const std::filesystem::path& path) {
     return config;
 }
 
-void save_config(const Config& config, const std::filesystem::path& path) {
-    config.validate();
+static void write_values(const std::map<std::string, std::string>& values,
+                         const std::filesystem::path& path, bool replace) {
     if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
-    const auto temporary = std::filesystem::path(path.string() + ".tmp");
+    static std::atomic<unsigned> counter{0};
+    const auto temporary = std::filesystem::u8path(path.u8string() + "." +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "." +
+        std::to_string(counter++) + ".tmp");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::error_code error; std::filesystem::remove(path, error); }
+    } cleanup{temporary};
     {
         std::ofstream stream(temporary, std::ios::trunc);
         if (!stream) throw std::runtime_error("cannot create configuration");
-        for (const auto& [key, value] : config_values(config, true)) stream << key << '=' << value << '\n';
+        for (const auto& [key, value] : values) stream << key << '=' << value << '\n';
         stream.flush();
         if (!stream) throw std::runtime_error("cannot write configuration");
     }
 #ifdef _WIN32
-    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                    MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0)))
         throw std::runtime_error("cannot atomically replace configuration");
 #else
-    std::filesystem::rename(temporary, path);
+    if (replace) std::filesystem::rename(temporary, path);
+    else std::filesystem::create_hard_link(temporary, path);
 #endif
+}
+
+void save_config(const Config& config, const std::filesystem::path& path) {
+    config.validate();
+    write_values(config_values(config, true), path, true);
+}
+
+static std::filesystem::path profiles_directory(const std::filesystem::path& path) {
+    return path.parent_path() / std::filesystem::u8path(path.filename().u8string() + ".profiles");
+}
+
+static std::filesystem::path profile_path(const std::filesystem::path& config_path, const std::string& name) {
+    const std::string allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+    if (name.empty() || name.size() > 64 || name.find_first_not_of(allowed) != std::string::npos)
+        throw std::invalid_argument("profile names require 1..64 ASCII letters, digits, underscores or hyphens");
+    return profiles_directory(config_path) / ("profile-" + name + ".conf");
+}
+
+std::vector<std::string> list_profiles(const std::filesystem::path& config_path) {
+    const auto directory = profiles_directory(config_path);
+    std::vector<std::string> names;
+    if (!std::filesystem::exists(directory)) return names;
+    for (const auto& file : std::filesystem::directory_iterator(directory)) {
+        const auto stem = file.path().stem().u8string();
+        if (file.is_regular_file() && file.path().extension() == ".conf" && stem.rfind("profile-", 0) == 0) {
+            const auto name = stem.substr(8);
+            try { profile_path(config_path, name); names.push_back(name); }
+            catch (const std::invalid_argument&) {}
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+void save_profile(const Config& config, const std::filesystem::path& config_path,
+                  const std::string& name, bool replace) {
+    config.validate();
+    const auto path = profile_path(config_path, name);
+    if (!replace && std::filesystem::exists(path))
+        throw std::runtime_error("profile already exists; pass --replace to overwrite");
+    std::map<std::string, std::string> values;
+    for (const auto& [key, value] : config_values(config, false))
+        if (key.rfind("mapping.", 0) == 0) values.emplace(key, value);
+    write_values(values, path, replace);
+}
+
+Config load_profile(Config config, const std::filesystem::path& config_path, const std::string& name) {
+    std::ifstream stream(profile_path(config_path, name));
+    if (!stream) throw std::runtime_error("profile not found");
+    // Missing keys in an older profile use mapping defaults, never the active profile's leftovers.
+    config.mapping = Mapping{};
+    config.target_virtual_desktop = true;
+    std::map<std::string, bool> seen;
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const auto equal = line.find('=');
+        if (equal == std::string::npos) throw std::invalid_argument("invalid profile line");
+        const auto key = line.substr(0, equal);
+        if (key.rfind("mapping.", 0) != 0 || seen[key])
+            throw std::invalid_argument("profile must contain only unique mapping keys");
+        seen[key] = true;
+        set_config(config, key, line.substr(equal + 1));
+    }
+    config.validate();
+    return config;
+}
+
+void delete_profile(const std::filesystem::path& config_path, const std::string& name) {
+    if (!std::filesystem::remove(profile_path(config_path, name)))
+        throw std::runtime_error("profile not found");
 }
 
 std::string json_escape(const std::string& text) {

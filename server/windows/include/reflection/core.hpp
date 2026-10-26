@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace reflection {
@@ -38,6 +39,10 @@ struct Mapping {
     bool relative = false;
     unsigned rotation = 0;
     double pressure_gamma = 1;
+    std::vector<std::pair<double, double>> pressure_curve;
+    unsigned position_steps_x = 0, position_steps_y = 0;
+    bool tilt_enabled = true;
+    double tilt_scale = 1;
     double sensitivity = 1;
 
     void validate() const;

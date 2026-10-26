@@ -47,6 +47,15 @@ jobs:
         run: |
           native_dir="$(swift build --package-path server/macos -c release --show-bin-path)"
           python3 tools/check_host.py --server "$native_dir/reflection"
+          python3 tools/check_controls.py --server "$native_dir/reflection"
+      - run: bash server/macos/scripts/build-app.sh
+      - name: Archive native macOS application
+        run: ditto -c -k --sequesterRsrc --keepParent server/macos/build/Reflection.app server/macos/build/Reflection-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reflection-macos
+          path: server/macos/build/Reflection-macOS.zip
+          retention-days: 14
 
   windows:
     runs-on: windows-latest
@@ -55,12 +64,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
       - run: cmake -S server/windows -B server/windows/build -A x64
       - run: cmake --build server/windows/build --config Release
       - run: ctest --test-dir server/windows/build -C Release --output-on-failure
       - run: python tools/check_host.py --server server/windows/build/Release/reflection-host.exe --platform windows
+      - run: python tools/check_controls.py --server server/windows/build/Release/reflection-host.exe --platform windows
+      - name: Test desktop host lifecycle
+        run: dotnet run --project server/windows/tests/desktop/Reflection.Desktop.Tests.csproj -c Release
+      - name: Build and publish WinUI desktop application
+        shell: pwsh
+        run: ./server/windows/scripts/build-ui.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: reflection-windows-x64
-          path: server/windows/build/Release/reflection-host.exe
+          path: |
+            server/windows/build/Release/reflection-host.exe
+            server/windows/build/ui/
           retention-days: 14

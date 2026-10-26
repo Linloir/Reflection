@@ -1,8 +1,9 @@
 # Reflection Windows Host
 
 Windows 宿主端使用原生 C++17、WinSock、BCrypt 和 Windows Synthetic Pointer
-API，将平板笔事件作为 `PT_PEN` 输入送入当前桌面。核心库不依赖窗口或 UI
-框架；CLI 是当前的完整控制入口，后续桌面 UI 可以复用相同核心。
+API，将平板笔事件作为 `PT_PEN` 输入送入当前桌面。桌面应用使用 WinUI 3，
+通过 CLI 的结构化接口控制同一个宿主进程。采样接收、映射和系统输入不依赖
+窗口或 .NET UI 线程，关闭或替换界面不会改变笔输入算法。
 
 ## 系统要求与兼容范围
 
@@ -44,6 +45,43 @@ cmake --install server/windows/build --config Release --prefix "$env:LOCALAPPDAT
 安装目录的 `bin` 加入 `PATH` 后，可以直接执行 `reflection-host`。不需要额外
 运行时包、内核驱动或后台安装器。蓝牙使用 Windows 自带协议栈。
 
+### WinUI 桌面应用
+
+另外安装 .NET 10 LTS SDK。桌面界面固定使用 Windows App SDK **2.5.1**，
+编译目标 Windows SDK 10.0.19041，最低运行系统声明为 10.0.17763
+（Windows 10 1809）。在 Windows 的 Developer PowerShell 中运行：
+
+```powershell
+./server/windows/scripts/build-ui.ps1
+./server/windows/build/ui/Reflection.Desktop.exe
+```
+
+脚本构建 C++ 宿主及 WinUI 项目，并将宿主、.NET 运行时和 Windows App SDK
+一起发布到 `server/windows/build/ui/`。分发和安装时保留**整个目录**，
+不要只复制界面的 `.exe`。支持 `-Architecture ARM64`；构建 ARM64 原生宿主
+需要相应的 Visual Studio C++ ARM64 工具。安装到用户目录的示例：
+
+```powershell
+./server/windows/scripts/build-ui.ps1 -InstallDirectory "$env:LOCALAPPDATA\Reflection\Desktop"
+& "$env:LOCALAPPDATA\Reflection\Desktop\Reflection.Desktop.exe"
+```
+
+首次打开界面会在没有配置时调用 `init`。界面包含启动、停止、dry-run、状态、
+重新启动、连接配置、显示器/映射区域、倾斜开关/比例、压力曲线、坐标步数和
+配置档管理。压力曲线可使用软/线性/硬预设、Gamma、自定义控制点文本，或拖动
+图中的内部控制点。所有保存动作由原生 CLI 验证；多字段设置在全部通过验证后
+一次写入，运行中的配置不会被部分更新。保存后使用“Save and restart”应用。
+启动界面时同样可以传入 `--config PATH`；初始化、所有配置命令和宿主进程都会
+使用该路径，支持包含空格的路径。
+
+Windows 11 在 `MicaController.IsSupported()` 返回真时使用系统 Mica 背景；
+Windows 10 使用当前系统主题的实色背景和 WinUI 控件。没有直接调用未公开的
+DWM API。系统材质会尊重系统设置与回退条件。UI 可替换，后台输入保持 C++。
+关闭窗口会停止该窗口启动的宿主；通过终端启动的宿主继续运行。
+
+配对字段默认隐藏。只有点击“Copy pairing key”时才显式读取密钥并复制到剪贴板，
+日志不会显示密钥。普通 UI 读取配置也不会取回密钥。
+
 ## CLI
 
 以下示例假设 `reflection-host` 已在 `PATH` 中：
@@ -54,6 +92,8 @@ reflection-host doctor
 reflection-host displays
 reflection-host config show
 reflection-host config validate
+reflection-host config snapshot
+reflection-host status
 reflection-host serve --dry-run
 ```
 
@@ -63,7 +103,14 @@ reflection-host serve --dry-run
 
 `serve --dry-run` 接收、认证、验证、映射事件并输出笔划边界诊断，不操作
 系统指针。去掉 `--dry-run` 后启用真实笔输入。`start` 是 `serve` 的别名，
-两者都在前台运行，按 Ctrl+C 停止。当前不包含服务安装或后台守护进程。
+两者都在前台运行，按 Ctrl+C 或从另一个终端运行 `reflection-host stop` 停止。
+`stop` 使用当前配置对应的本地命名事件进行协作停止，不会终止任意 PID。
+同一配置只允许一个宿主。当前不包含系统服务安装或登录时自动启动。
+
+`status` 输出 `running`、`processAlive`、`controlAvailable` 和
+`restartRequired`；运行时还包含 PID、监听/连接状态、端口、会话采样计数、
+dry-run 和运行时间。采样计数以低频更新，不阻塞输入路径。`restartRequired`
+比较磁盘配置与启动时的配置；UI 和终端修改都能被发现。
 
 ```powershell
 reflection-host config show --secrets
@@ -74,6 +121,11 @@ reflection-host serve
 写入公共日志。普通诊断和连接日志不会包含密钥。配置命令成功返回 0，错误
 返回非零；设置、诊断和事件日志使用 JSON，便于脚本和 Agent 解析。
 配置修改在下次启动服务时生效。
+
+UI 使用 `config snapshot` 读取隐藏密钥的配置及不透明 `revision`，保存时调用
+`config apply --if-current REVISION KEY VALUE ...`。配置锁内比较版本并写入，
+如果终端或 Agent 已修改配置，保存会报冲突，要求刷新；不会用旧 UI 数据静默
+覆盖外部修改。普通 `config apply` 仍适用于不需要条件更新的脚本。
 
 ### USB
 
@@ -143,6 +195,7 @@ reflection-host config set mapping.target -1920,0,1920,1080
 reflection-host config set mapping.rotation 90
 reflection-host config set mapping.pressure_gamma 0.8
 reflection-host config set mapping.sensitivity 1.0
+reflection-host config apply mapping.pressure_gamma 0.8 mapping.tilt_scale 1.0
 ```
 
 | 配置 | 支持值 |
@@ -156,11 +209,55 @@ reflection-host config set mapping.sensitivity 1.0
 | `mapping.target` | `desktop` 或物理像素矩形 |
 | `mapping.rotation` | 0、90、180、270；倾斜轴随之旋转 |
 | `mapping.pressure_gamma` | 0.1..10；1 为线性，低于 1 更轻压易出粗线 |
+| `mapping.pressure_curve` | 空字符串使用 Gamma；否则为 `input,output;...` 的单调分段线性曲线 |
+| `mapping.position_steps_x` / `mapping.position_steps_y` | 0 为原生坐标；2..65536 为映射范围内的离散位置数 |
+| `mapping.tilt_enabled` | `true` / `false`；关闭后不声明倾斜轴，输出倾斜值为 0 |
+| `mapping.tilt_scale` | 0..2；旋转后的倾斜角按比例缩放，并限制在 -90..90 度 |
 | `mapping.sensitivity` | 大于 0 且不超过 10；只影响相对模式 |
 
 相对模式从当前系统指针位置开始，以平板移动量改变位置；离开感应区域后
 重新进入不会跳回绝对坐标。目标矩形限制指针移动范围。没有人为增加延迟
 的平滑或预测定时器，笔压力与位置直接按采样数据映射。
+
+### 压力曲线和分辨率
+
+自定义曲线有 2..32 个控制点，以 `0,0` 开始、`1,1` 结束。输入严格递增，
+输出单调不减，所有坐标在 0..1；无效曲线会被拒绝。存在自定义曲线时覆盖
+Gamma，抬笔始终强制压力为零。例如：
+
+```powershell
+reflection-host config set mapping.pressure_curve "0,0;0.25,0.1;0.75,0.9;1,1"
+reflection-host config set mapping.pressure_curve ""
+reflection-host config apply mapping.position_steps_x 4096 mapping.position_steps_y 4096
+reflection-host config apply mapping.tilt_enabled true mapping.tilt_scale 0.9
+```
+
+`config apply KEY VALUE [KEY VALUE ...]` 与多个 `set` 的区别是整体校验、一次提交。
+Windows PowerShell 5.1 可能在原生命令参数传递时丢弃空字符串；这种情况下使用
+PowerShell 7、桌面界面切换 Gamma，或在配置文件中将 `mapping.pressure_curve=`
+保留为空，然后执行 `config validate`。
+
+这里的坐标步数是**输出坐标量化**，并不改变平板硬件的 LPI 或采样频率，也不
+增加 Windows 压力 API 的 1025 个数值。默认 0 保留协议中的连续坐标，到系统
+输入边界才转换为物理像素；设置较低步数会形成可见阶梯。相对模式内部始终保留
+未量化的位移累积，因此小幅移动不会因每次舍入而永久丢失。
+
+### 多套配置档
+
+```powershell
+reflection-host profiles save Drawing
+reflection-host profiles list
+reflection-host profiles show Drawing
+reflection-host profiles load Drawing
+reflection-host profiles save Drawing --replace
+reflection-host profiles delete Drawing
+```
+
+`profile` 是 `profiles` 的别名。名称允许 1..64 个 ASCII 字母、数字、
+下划线或连字符。重复保存需要显式 `--replace`。配置档位于配置文件旁边的
+`<配置文件名>.profiles/`，仅保存 `mapping.*`，不会保存配对密钥、监听地址
+或传输方式。加载后保留当前连接配置；运行中的宿主在重新启动后使用新映射。
+`show` 同样只输出映射字段。删除配置档不会修改当前活动配置。
 
 ## 结构和扩展
 
@@ -173,8 +270,11 @@ reflection-host config set mapping.sensitivity 1.0
 | `server.cpp` | TCP / RFCOMM 有序流、认证、心跳和单客户端会话 |
 | `crypto.cpp` | Windows BCrypt 随机数及 HMAC-SHA256 |
 | `main.cpp` | CLI 参数、JSON 命令输出和进程生命周期 |
+| `runtime.cpp` | 单实例所有权、协作停止和内存中的状态快照 |
+| `ui/HostClient.cs` | CLI 进程适配、异步输出、超时和启动/停止 |
+| `ui/MainWindow.xaml` | 可替换的原生 WinUI 界面 |
 
-UI 通过相同配置模型和会话入口工作，不需要重新实现协议、映射或系统调用。
+UI 通过 CLI 工作，不需要重新实现协议、配置持久化、映射或系统调用。
 主机核心通过结构化 `EventSink` 发出事件，JSON 和终端输出只存在于 CLI。
 事件回调同步执行，应快速返回；UI 可以将事件转发到自己的线程或消息队列。
 将来可以添加 VHF 虚拟 HID 或 WinTab 适配器，而无需修改 Android 采集代码。
@@ -187,13 +287,24 @@ VHF 涉及内核驱动、签名、安装和更严格的兼容性验证，不属�
 
 ## 验证状态
 
-可移植核心已在 macOS 上通过 38 项检查，覆盖压力曲线、负屏幕坐标、旋转、
-相对模式重新进入、非法接触状态、非法输入、协议向量、重放和配置验证。
+可移植核心检查覆盖自定义压力曲线、负屏幕坐标、旋转、倾斜能力开关、
+相对模式重新进入和细小位移累积、坐标量化、配置档凭据隔离/路径校验、
+非法接触状态、非法输入、协议向量、重放和配置验证。
 可使用 `scripts/test-portable.sh` 在有 C++17 编译器的系统上重新运行。
 完整 Windows x64 宿主与密码学测试程序均已通过严格警告检查下的 MinGW
 交叉编译。Windows 的 BCrypt
 测试包含统一协议中的认证向量，需在 Windows 的 CTest 中运行。
 
+WinUI 的 XAML 编译和运行需要 Windows 工具链；macOS 上的 XML/源码检查不能
+证明窗口已经正确呈现。Windows CI 包含桌面应用的实际构建步骤。
+桌面进程控制的便携回归检查使用真实测试子进程，覆盖初始查询期间关闭窗口、
+宿主尚未创建停止通道时关闭窗口，以及正常启动/停止；可以独立运行：
+
+```powershell
+dotnet run --project server/windows/tests/desktop/Reflection.Desktop.Tests.csproj -c Release
+```
+
+Windows CTest 另外检查配置所有权、内存状态、配置改变后的重启提示和协作停止。
 Windows 桌面注入、应用实际压力/橡皮擦行为、不同 DPI/显示器组合、USB 与
 蓝牙连接、断线恢复和端到端延迟仍需要 Windows 实机验证。源码或交叉编译
 通过不能替代这些测试。建议先运行 `serve --dry-run` 确认数据，再在支持
@@ -207,3 +318,6 @@ Windows Ink 的绘画程序里测试逐渐加压、悬停、翻转橡皮擦、�
 - [Bluetooth bind 与 RFCOMM 信道](https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-bind)
 - [Bluetooth SDP 服务注册](https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-wsasetservice)
 - [Virtual HID Framework](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/virtual-hid-framework--vhf-)
+- [Windows App SDK 稳定版本](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/stable-channel)
+- [WinUI 3 系统背景](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/system-backdrop-controller)
+- [Windows App SDK 自包含部署](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps)

@@ -7,3 +7,10 @@
 *.ilk
 *.exp
 *.lib
+ui/bin/
+ui/obj/
+ui/.vs/
+ui/Publish/
+tests/desktop/bin/
+tests/desktop/obj/
+*.user

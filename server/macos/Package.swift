@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "ReflectionCore", targets: ["ReflectionCore"]),
         .executable(name: "reflection", targets: ["ReflectionCLI"]),
+        .executable(name: "reflection-app", targets: ["ReflectionApp"]),
         .executable(name: "reflection-core-checks", targets: ["ReflectionCoreChecks"])
     ],
     targets: [
@@ -19,6 +20,8 @@ let package = Package(
             exclude: ["Info.plist"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",
                                           "-Xlinker", "__info_plist", "-Xlinker", infoPlist])]),
+        .executableTarget(name: "ReflectionApp", dependencies: ["ReflectionCore"],
+            exclude: ["Info.plist"]),
         .executableTarget(name: "ReflectionCoreChecks", dependencies: ["ReflectionCore"], path: "Checks"),
         .testTarget(name: "ReflectionCoreTests", dependencies: ["ReflectionCore"])
     ]

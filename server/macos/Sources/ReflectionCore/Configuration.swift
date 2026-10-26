@@ -14,18 +14,107 @@ public struct Region: Codable, Equatable {
     }
 }
 
-public struct MappingConfiguration: Codable {
+public struct PressurePoint: Codable, Equatable {
+    public var input: Double
+    public var output: Double
+    public init(input: Double, output: Double) { self.input = input; self.output = output }
+}
+
+public struct MappingConfiguration: Codable, Equatable {
     public var mode = "absolute"
     public var source = Region(x: 0, y: 0, width: 1, height: 1)
     public var target: Region? = nil
     public var displayID: UInt32? = nil
     public var pressureGamma = 1.0
+    public var pressureCurve: [PressurePoint] = []
+    public var tiltEnabled = true
+    public var tiltScale = 1.0
+    public var positionStepsX = 0
+    public var positionStepsY = 0
     public var relativeSensitivity = 1.0
     public var rotation = 0
     public var preserveAspect = false
     public var sourceAspect = 1.0
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case mode, source, target, displayID, pressureGamma, pressureCurve
+        case relativeSensitivity, rotation, preserveAspect, sourceAspect
+        case tiltEnabled, tiltScale, positionStepsX, positionStepsY
+    }
+
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decodeIfPresent(String.self, forKey: .mode) ?? mode
+        source = try c.decodeIfPresent(Region.self, forKey: .source) ?? source
+        target = try c.decodeIfPresent(Region.self, forKey: .target)
+        displayID = try c.decodeIfPresent(UInt32.self, forKey: .displayID)
+        pressureGamma = try c.decodeIfPresent(Double.self, forKey: .pressureGamma) ?? pressureGamma
+        pressureCurve = try c.decodeIfPresent([PressurePoint].self, forKey: .pressureCurve) ?? pressureCurve
+        tiltEnabled = try c.decodeIfPresent(Bool.self, forKey: .tiltEnabled) ?? tiltEnabled
+        tiltScale = try c.decodeIfPresent(Double.self, forKey: .tiltScale) ?? tiltScale
+        positionStepsX = try c.decodeIfPresent(Int.self, forKey: .positionStepsX) ?? positionStepsX
+        positionStepsY = try c.decodeIfPresent(Int.self, forKey: .positionStepsY) ?? positionStepsY
+        relativeSensitivity = try c.decodeIfPresent(Double.self, forKey: .relativeSensitivity) ?? relativeSensitivity
+        rotation = try c.decodeIfPresent(Int.self, forKey: .rotation) ?? rotation
+        preserveAspect = try c.decodeIfPresent(Bool.self, forKey: .preserveAspect) ?? preserveAspect
+        sourceAspect = try c.decodeIfPresent(Double.self, forKey: .sourceAspect) ?? sourceAspect
+    }
+
+    public func mapPressure(_ value: Double) -> Double {
+        let input = value.isFinite ? min(1, max(0, value)) : 0
+        guard pressureCurve.count >= 2 else { return pow(input, pressureGamma) }
+        for index in 1..<pressureCurve.count {
+            let right = pressureCurve[index], left = pressureCurve[index - 1]
+            if input <= right.input {
+                let fraction = (input - left.input) / (right.input - left.input)
+                return left.output + fraction * (right.output - left.output)
+            }
+        }
+        return 1
+    }
+
+    public func validate() throws {
+        guard ["absolute", "relative"].contains(mode) else {
+            throw ReflectionError.invalid("mapping.mode must be absolute or relative")
+        }
+        let s = source
+        guard [s.x, s.y, s.width, s.height].allSatisfy(\.isFinite),
+              s.x >= 0, s.y >= 0, s.width > 0, s.height > 0,
+              s.x + s.width <= 1.000001, s.y + s.height <= 1.000001 else {
+            throw ReflectionError.invalid("mapping.source must be a nonempty normalized rectangle")
+        }
+        if let t = target {
+            guard [t.x, t.y, t.width, t.height, t.x + t.width, t.y + t.height].allSatisfy(\.isFinite),
+                  t.width > 0, t.height > 0 else {
+                throw ReflectionError.invalid("mapping.target must be a finite nonempty desktop rectangle")
+            }
+        }
+        guard pressureGamma.isFinite, pressureGamma > 0, pressureGamma <= 10,
+              relativeSensitivity.isFinite, relativeSensitivity > 0, relativeSensitivity <= 100,
+              sourceAspect.isFinite, sourceAspect > 0, [0, 90, 180, 270].contains(rotation),
+              tiltScale.isFinite, (0...2).contains(tiltScale),
+              [positionStepsX, positionStepsY].allSatisfy({ $0 == 0 || (2...65536).contains($0) }) else {
+            throw ReflectionError.invalid("Invalid pressure, sensitivity, rotation, tilt, or coordinate steps")
+        }
+        if !pressureCurve.isEmpty {
+            guard (2...32).contains(pressureCurve.count),
+                  pressureCurve.first == PressurePoint(input: 0, output: 0),
+                  pressureCurve.last == PressurePoint(input: 1, output: 1) else {
+                throw ReflectionError.invalid("Pressure curve needs 2..32 points, from (0,0) to (1,1)")
+            }
+            for (index, point) in pressureCurve.enumerated() {
+                guard point.input.isFinite, point.output.isFinite,
+                      (0...1).contains(point.input), (0...1).contains(point.output),
+                      index == 0 || (point.input > pressureCurve[index - 1].input
+                        && point.output >= pressureCurve[index - 1].output) else {
+                    throw ReflectionError.invalid("Pressure curve inputs must increase and outputs must not decrease")
+                }
+            }
+        }
+    }
 }
 
 public struct ServerConfiguration: Codable {
@@ -43,28 +132,7 @@ public struct ServerConfiguration: Codable {
         guard token.count == 64, token.allSatisfy({ $0.isHexDigit && $0.isASCII }) else {
             throw ReflectionError.invalid("token must contain exactly 64 hexadecimal characters")
         }
-        guard ["absolute", "relative"].contains(mapping.mode) else {
-            throw ReflectionError.invalid("mapping.mode must be absolute or relative")
-        }
-        let s = mapping.source
-        guard [s.x, s.y, s.width, s.height].allSatisfy(\.isFinite),
-              s.x >= 0, s.y >= 0, s.width > 0, s.height > 0,
-              s.x + s.width <= 1.000001, s.y + s.height <= 1.000001 else {
-            throw ReflectionError.invalid("mapping.source must be a nonempty normalized rectangle")
-        }
-        if let t = mapping.target {
-            guard [t.x, t.y, t.width, t.height].allSatisfy(\.isFinite),
-                  t.width > 0, t.height > 0 else {
-                throw ReflectionError.invalid("mapping.target must be a finite nonempty desktop rectangle")
-            }
-        }
-        guard mapping.pressureGamma.isFinite, mapping.pressureGamma > 0,
-              mapping.pressureGamma <= 10, mapping.relativeSensitivity.isFinite,
-              mapping.relativeSensitivity > 0, mapping.relativeSensitivity <= 100,
-              mapping.sourceAspect.isFinite, mapping.sourceAspect > 0,
-              [0, 90, 180, 270].contains(mapping.rotation) else {
-            throw ReflectionError.invalid("Invalid pressure, sensitivity, rotation, or aspect setting")
-        }
+        try mapping.validate()
     }
 
     public static func randomToken() throws -> String {
@@ -90,11 +158,12 @@ public struct ServerConfiguration: Codable {
 
     public func save(to url: URL) throws {
         try validate()
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+        let destination = url.standardizedFileURL.resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try writePrivateData(encoder.encode(self), to: url)
+        try writePrivateData(encoder.encode(self), to: destination)
     }
 }
 
