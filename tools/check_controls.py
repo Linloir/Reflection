@@ -59,19 +59,20 @@ def main():
         checks.append("invalid multi-field edit leaves configuration unchanged")
         call("config", "apply", gamma, "1.8", curve_key, curve_value)
         saved = config.read_bytes()
-        call("profiles", "save", "Soft pencil")
-        call("profiles", "save", "Soft pencil", fails=True)
+        profile_name = "Soft_pencil" if windows else "Soft pencil"
+        call("profiles", "save", profile_name)
+        call("profiles", "save", profile_name, fails=True)
         call("profiles", "save", "../escape", fails=True)
-        assert call("profiles", "list")["profiles"] == ["Soft pencil"]
-        profile = call("profiles", "show", "Soft pencil")
+        assert call("profiles", "list")["profiles"] == [profile_name]
+        profile = call("profiles", "show", profile_name)
         profile_text = json.dumps(profile)
         assert "token" not in profile_text and '"port"' not in profile_text and '"bind"' not in profile_text
         checks.append("named mapping profiles exclude listener settings and reject unsafe names")
         call("config", "set", gamma, "0.6")
-        call("profiles", "load", "Soft pencil")
+        call("profiles", "load", profile_name)
         assert config.read_bytes() == saved
         checks.append("profile activation restores mapping and preserves pairing configuration")
-        call("profiles", "delete", "Soft pencil")
+        call("profiles", "delete", profile_name)
         assert call("profiles", "list")["profiles"] == []
         if not windows:
             alias = Path(directory) / "alias.json"

@@ -27,7 +27,9 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
-      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        with:
+          # Override the default list, which includes the retired "tools" package.
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
       - run: bash client/android/scripts/test-core.sh
       - run: bash client/android/scripts/build-sdk.sh
       - uses: actions/upload-artifact@v4
