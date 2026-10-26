@@ -23,6 +23,10 @@ public final class TransportProbe {
             // Distinct historical samples can share one Android millisecond tick.
             // Exercise the production adapter and wire writer together, including equal-time UP.
             PenInput input = new PenInput(transport::submit);
+            boolean eraser = args.length > 1 && "eraser".equals(args[1]);
+            if (eraser) {
+                InputAdapterTest.emitEraserFlipScenario(input);
+            } else {
             input.onEvent(new MotionEvent(MotionEvent.ACTION_DOWN,
                 new MotionEvent.Sample(1000, 0, 400, 0)), 1001, 1001);
             input.onEvent(new MotionEvent(MotionEvent.ACTION_MOVE,
@@ -32,9 +36,11 @@ public final class TransportProbe {
                 new MotionEvent.Sample(1002, 400, 400, 0.4f)), 1001, 1001);
             input.onEvent(new MotionEvent(MotionEvent.ACTION_UP,
                 new MotionEvent.Sample(1002, 500, 400, 0)), 1001, 1001);
+            }
+            int expected = eraser ? 17 : 6;
             deadline = System.nanoTime() + 3000000000L;
-            while (transport.sent() < 6 && System.nanoTime() < deadline) Thread.sleep(10);
-            if (transport.sent() != 6) throw new AssertionError("Not all samples sent: " + transport.status());
+            while (transport.sent() < expected && System.nanoTime() < deadline) Thread.sleep(10);
+            if (transport.sent() != expected) throw new AssertionError("Not all samples sent: " + transport.status());
             if (args.length > 1 && "legacy".equals(args[1])) {
                 Thread.sleep(1000);
                 if (!transport.connected()) throw new AssertionError("Legacy host rejected equal timestamps: " + transport.status());
@@ -44,7 +50,8 @@ public final class TransportProbe {
             deadline = System.nanoTime() + 2000000000L;
             while (transport.connected() && System.nanoTime() < deadline) Thread.sleep(10);
             if (transport.connected()) throw new AssertionError("Replayed heartbeat was accepted");
-            System.out.println("Android transport handshake, event delivery and replay rejection passed");
+            System.out.println("Android transport " + (eraser ? "eraser hover/flip, contact and button metadata" : "equal-timestamp history")
+                + ", authentication and replay rejection passed");
         } finally { transport.stop(); }
     }
 }

@@ -7,7 +7,8 @@ public final class MotionEvent {
         ACTION_HOVER_ENTER=9, ACTION_HOVER_EXIT=10, ACTION_BUTTON_PRESS=11, ACTION_BUTTON_RELEASE=12;
     public static final int TOOL_TYPE_FINGER=1, TOOL_TYPE_STYLUS=2, TOOL_TYPE_ERASER=4, BUTTON_STYLUS_PRIMARY=32, BUTTON_STYLUS_SECONDARY=64, BUTTON_SECONDARY=2, BUTTON_TERTIARY=4;
     public static final int AXIS_PRESSURE=2, AXIS_ORIENTATION=8, AXIS_DISTANCE=24, AXIS_TILT=25;
-    private final int action, buttons;
+    private final int action;
+    private int buttons;
     private int actionIndex;
     private int[] pointerIds = {0}, tools = {TOOL_TYPE_STYLUS};
     private InputDevice device = new InputDevice();
@@ -40,6 +41,7 @@ public final class MotionEvent {
             throw new IllegalArgumentException("History lengths must match");
     }
     public MotionEvent withTool(int tool) { tools[0] = tool; return this; }
+    public MotionEvent withButtons(int value) { buttons = value; return this; }
     public MotionEvent withDevice(InputDevice value) { device = value; return this; }
     private Sample current(int index) { return samples[index][samples[index].length - 1]; }
     public int getActionMasked() { return action; }

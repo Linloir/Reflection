@@ -91,19 +91,15 @@ public:
 
     void release() noexcept override {
         if (!in_range_) return;
-        auto info = last_;
+        auto info = synthetic_pen_release(last_,contact_);
         // Preserve the last successfully injected position for the terminal contact
         // frame, including during topology changes. Rebase only the subsequent exit.
-        info.penInfo.pressure = 0;
-        info.penInfo.penFlags = eraser_ ? PEN_FLAG_INVERTED | PEN_FLAG_ERASER : PEN_FLAG_NONE;
         if (contact_) {
-            info.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_PRIMARY | POINTER_FLAG_INRANGE |
-                POINTER_FLAG_UP | POINTER_FLAG_CANCELED;
             inject_retry(info);
         }
+        info=synthetic_pen_release(info,false);
         try { info.penInfo.pointerInfo.ptPixelLocation = synthetic_pointer_position(last_desktop_x_, last_desktop_y_, virtual_desktop()); }
         catch (const std::exception&) {}
-        info.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_UPDATE;
         inject_retry(info);
         contact_ = false;
         in_range_ = false;
@@ -210,7 +206,15 @@ POINTER_TYPE_INFO synthetic_pen_frame(const MappedSample& s,const Rect& bounds,c
     else if(s.source.phase==Phase::up) pen.pointerInfo.pointerFlags|=POINTER_FLAG_UP;
     else pen.pointerInfo.pointerFlags|=POINTER_FLAG_UPDATE;
     if(contact) pen.pointerInfo.pointerFlags|=POINTER_FLAG_INCONTACT|(s.source.barrel?POINTER_FLAG_SECONDBUTTON:POINTER_FLAG_FIRSTBUTTON);
-    if(s.source.eraser) pen.penFlags|=PEN_FLAG_INVERTED|PEN_FLAG_ERASER;
+    // Inversion identifies the tool; ERASER is its active contact switch. Keeping
+    // ERASER set during hover/UP incorrectly advertises an erase action without
+    // contact. Windows' pen reporting rules also require the first cleared erase
+    // frame to keep the last contact position, as the UP path above does.
+    // https://learn.microsoft.com/windows-hardware/design/component-guidelines/required-hid-top-level-collections#eraser
+    if(s.source.eraser) {
+        pen.penFlags|=PEN_FLAG_INVERTED;
+        if(contact) pen.penFlags|=PEN_FLAG_ERASER;
+    }
     if(s.source.barrel) pen.penFlags|=PEN_FLAG_BARREL;
     pen.penMask=PEN_MASK_PRESSURE;
     if(s.source.tilt) pen.penMask|=PEN_MASK_TILT_X|PEN_MASK_TILT_Y;
@@ -235,9 +239,24 @@ POINTER_TYPE_INFO synthetic_pen_repeat(const POINTER_TYPE_INFO& previous,bool co
     auto info=previous;
     auto& pen=info.penInfo;
     pen.pointerInfo.pointerFlags=POINTER_FLAG_PRIMARY|POINTER_FLAG_INRANGE|POINTER_FLAG_UPDATE;
+    pen.penFlags&=~PEN_FLAG_ERASER;
+    if(contact && (pen.penFlags&PEN_FLAG_INVERTED)) pen.penFlags|=PEN_FLAG_ERASER;
     if(contact) pen.pointerInfo.pointerFlags|=POINTER_FLAG_INCONTACT|
         ((pen.penFlags&PEN_FLAG_BARREL)?POINTER_FLAG_SECONDBUTTON:POINTER_FLAG_FIRSTBUTTON);
     else pen.pressure=0;
+    return info;
+}
+
+POINTER_TYPE_INFO synthetic_pen_release(const POINTER_TYPE_INFO& previous,bool contact) {
+    auto info=previous;
+    auto& pen=info.penInfo;
+    pen.pressure=0;
+    // Preserve inverted identity only while the canceled UP is still in range.
+    // Both terminal frames clear the erase switch and all pressed buttons.
+    pen.penFlags=contact?(pen.penFlags&PEN_FLAG_INVERTED):PEN_FLAG_NONE;
+    pen.pointerInfo.pointerFlags=contact?
+        POINTER_FLAG_PRIMARY|POINTER_FLAG_INRANGE|POINTER_FLAG_UP|POINTER_FLAG_CANCELED:
+        POINTER_FLAG_UPDATE;
     return info;
 }
 

@@ -91,6 +91,59 @@ int main() {
             require((hover.penInfo.penFlags&PEN_FLAG_BARREL) &&
                     !(hover.penInfo.pointerInfo.pointerFlags&(POINTER_FLAG_FIRSTBUTTON|POINTER_FLAG_SECONDBUTTON|POINTER_FLAG_INCONTACT)),
                     "barrel hover reports pen button without creating pointer contact buttons");
+            for(bool inverted:{false,true}) for(bool barrel:{false,true}) {
+                MappedSample tool;tool.x=-1800;tool.y=500;tool.pressure=.5;
+                tool.source.eraser=inverted;tool.source.barrel=barrel;
+                POINTER_TYPE_INFO prior{};bool have_prior=false;
+                for(Phase phase:{Phase::hover,Phase::down,Phase::move,Phase::up}) {
+                    tool.source.phase=phase;
+                    const bool touching=phase==Phase::down || phase==Phase::move;
+                    const auto frame=synthetic_pen_frame(tool,desktop,have_prior?&prior:nullptr);
+                    const auto& p=frame.penInfo;
+                    require(bool(p.penFlags&PEN_FLAG_INVERTED)==inverted &&
+                            bool(p.penFlags&PEN_FLAG_ERASER)==(inverted&&touching) &&
+                            bool(p.penFlags&PEN_FLAG_BARREL)==barrel,
+                            "eraser identity is separate from erase contact across hover/down/move/up");
+                    require(bool(p.pointerInfo.pointerFlags&POINTER_FLAG_INCONTACT)==touching &&
+                            bool(p.pointerInfo.pointerFlags&POINTER_FLAG_FIRSTBUTTON)==(touching&&!barrel) &&
+                            bool(p.pointerInfo.pointerFlags&POINTER_FLAG_SECONDBUTTON)==(touching&&barrel) &&
+                            p.pressure==(touching?512u:0u),
+                            "tip/eraser hover and up never press pointer buttons or report pressure");
+                    const auto refresh=synthetic_pen_repeat(frame,touching);
+                    require(bool(refresh.penInfo.penFlags&PEN_FLAG_ERASER)==(inverted&&touching) &&
+                            bool(refresh.penInfo.penFlags&PEN_FLAG_INVERTED)==inverted &&
+                            bool(refresh.penInfo.penFlags&PEN_FLAG_BARREL)==barrel &&
+                            refresh.penInfo.pressure==p.pressure,
+                            "keepalive preserves eraser identity and only repeats actual erase contact");
+                    const auto finish=synthetic_pen_release(frame,touching);
+                    require(finish.penInfo.pressure==0 && !(finish.penInfo.penFlags&(PEN_FLAG_ERASER|PEN_FLAG_BARREL)) &&
+                            bool(finish.penInfo.penFlags&PEN_FLAG_INVERTED)==(inverted&&touching) &&
+                            !(finish.penInfo.pointerInfo.pointerFlags&(POINTER_FLAG_INCONTACT|POINTER_FLAG_FIRSTBUTTON|POINTER_FLAG_SECONDBUTTON)),
+                            "cancel/release clears erase and button switches without inventing contact");
+                    require(finish.penInfo.pointerInfo.ptPixelLocation.x==p.pointerInfo.ptPixelLocation.x &&
+                            finish.penInfo.pointerInfo.ptPixelLocation.y==p.pointerInfo.ptPixelLocation.y &&
+                            bool(finish.penInfo.pointerInfo.pointerFlags&POINTER_FLAG_UP)==touching &&
+                            bool(finish.penInfo.pointerInfo.pointerFlags&POINTER_FLAG_CANCELED)==touching,
+                            "terminal cancel clears eraser at the last injected contact position");
+                    const auto exit=synthetic_pen_release(finish,false);
+                    require(exit.penInfo.penFlags==PEN_FLAG_NONE && exit.penInfo.pressure==0 &&
+                            exit.penInfo.pointerInfo.pointerFlags==POINTER_FLAG_UPDATE,
+                            "range exit leaves no inverted erase or button state latched");
+                    // Even an old in-contact frame must become safe if refreshed
+                    // with the backend's current hover state after a terminal event.
+                    const auto hover_refresh=synthetic_pen_repeat(frame,false);
+                    require(!(hover_refresh.penInfo.penFlags&PEN_FLAG_ERASER) && hover_refresh.penInfo.pressure==0 &&
+                            !(hover_refresh.penInfo.pointerInfo.pointerFlags&(POINTER_FLAG_INCONTACT|POINTER_FLAG_FIRSTBUTTON|POINTER_FLAG_SECONDBUTTON)),
+                            "hover keepalive cannot resurrect a prior erasing contact");
+                    prior=frame;have_prior=true;
+                }
+                tool.source.phase=Phase::hover;tool.source.eraser=!inverted;
+                const auto flipped=synthetic_pen_frame(tool,desktop,nullptr);
+                require((flipped.penInfo.pointerInfo.pointerFlags&POINTER_FLAG_NEW) &&
+                        bool(flipped.penInfo.penFlags&PEN_FLAG_INVERTED)==!inverted &&
+                        !(flipped.penInfo.penFlags&PEN_FLAG_ERASER),
+                        "a flipped hover starts the new tool in range without erasing");
+            }
             for (const auto target : {Rect{-3840, 0, 3840, 2160}, Rect{0, 0, 3840, 2160},
                                       Rect{-3840, 0, 7680, 2160}}) {
                 Mapping mapping; mapping.target = target;

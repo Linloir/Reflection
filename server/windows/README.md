@@ -339,9 +339,16 @@ Windows Ink 的绘画程序里测试逐渐加压、悬停、翻转橡皮擦、�
 
 ## 官方接口资料
 
+橡皮擦的工具身份与接触状态分别报告：翻转悬浮只设置 `PEN_FLAG_INVERTED`，
+真正接触时才同时设置 `PEN_FLAG_ERASER`。抬起、取消、退出和悬浮保活都清除
+擦除接触位及压力，保留需要的倒置身份，防止悬浮被应用解释为擦除或拖动。
+回归检查覆盖笔尖/橡皮、侧键、落笔/抬笔及保活；Inkodo 等应用的实际表现需用物理笔复测。
+
 - [CreateSyntheticPointerDevice](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createsyntheticpointerdevice)
 - [InjectSyntheticPointerInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-injectsyntheticpointerinput)
 - [POINTER_PEN_INFO 压力和倾斜范围](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-pointer_pen_info)
+- [Pen Flags 倒置与擦除标记](https://learn.microsoft.com/en-us/windows/win32/inputmsg/pen-flags-constants)
+- [Windows Pen 擦除状态要求](https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/required-hid-top-level-collections#eraser)
 - [Bluetooth bind 与 RFCOMM 信道](https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-bind)
 - [Bluetooth SDP 服务注册](https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-wsasetservice)
 - [Virtual HID Framework](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/virtual-hid-framework--vhf-)

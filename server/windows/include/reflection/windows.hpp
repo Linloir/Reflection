@@ -29,6 +29,8 @@ POINTER_TYPE_INFO synthetic_pen_frame(const MappedSample& sample, const Rect& vi
                                      const POINTER_TYPE_INFO* previous);
 bool identical_pen_update(const POINTER_TYPE_INFO& next, const POINTER_TYPE_INFO& previous);
 POINTER_TYPE_INFO synthetic_pen_repeat(const POINTER_TYPE_INFO& previous, bool contact);
+// A terminal contact frame (contact=true) precedes the out-of-range frame (false).
+POINTER_TYPE_INFO synthetic_pen_release(const POINTER_TYPE_INFO& previous, bool contact);
 bool synthetic_pen_refresh_due(bool in_range, int64_t elapsed_us, const Rect& previous, const Rect& current);
 bool pen_api_available();
 std::unique_ptr<InputBackend> make_pen_backend(bool dry_run, bool show_cursor = true);

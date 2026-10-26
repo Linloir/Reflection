@@ -187,6 +187,74 @@ public final class InputAdapterTest {
         check(PenInput.lastRawButtons() == MotionEvent.BUTTON_STYLUS_PRIMARY && PenInput.barrelButtonSamples() == buttonBefore + 1,
             "button diagnostics distinguish raw eraser and barrel switch");
     }
+    /** Shared input fixture; the TCP peer independently checks the serialized result. */
+    public static void emitEraserFlipScenario(PenInput adapter) {
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_ENTER, 1000, .8f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_HOVER_MOVE,
+            new MotionEvent.Sample(1004, 110, 210, .4f), new MotionEvent.Sample(1008, 120, 220, .9f))
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_BUTTON_PRESS, 1012, .7f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER).withButtons(MotionEvent.BUTTON_STYLUS_PRIMARY), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_BUTTON_RELEASE, 1016, .7f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1020, .2f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        // Android may dispatch a delayed hover exit after contact has already begun.
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_EXIT, 1021, .8f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(new MotionEvent(MotionEvent.ACTION_MOVE,
+            new MotionEvent.Sample(1024, 130, 230, .4f), new MotionEvent.Sample(1028, 140, 240, .6f))
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_BUTTON_PRESS, 1032, .7f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER).withButtons(MotionEvent.BUTTON_STYLUS_PRIMARY), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_BUTTON_RELEASE, 1036, .7f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_UP, 1040, .9f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 1044, .8f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_EXIT, 1048, .8f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_ENTER, 1052, .7f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_BUTTON_PRESS, 1056, .6f, 0, 0)
+            .withButtons(MotionEvent.BUTTON_STYLUS_SECONDARY), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_BUTTON_RELEASE, 1060, .6f, 0, 0), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_EXIT, 1064, .6f, 0, 0), 1001, 1001);
+    }
+    private static void eraserHoverAndFlipNeverInventContact() {
+        List<PenSample> samples = new ArrayList<>();
+        emitEraserFlipScenario(new PenInput(samples::add));
+        int[] phases = {0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 3, 0, 5, 0, 0, 0, 5};
+        float[] pressures = {0, 0, 0, 0, 0, .2f, .4f, .6f, .7f, .7f, 0, 0, 0, 0, 0, 0, 0};
+        check(samples.size() == phases.length, "eraser flip preserves real contact and suppresses late hover exit");
+        for (int i = 0; i < samples.size(); i++) {
+            PenSample sample = samples.get(i);
+            check(sample.phase == phases[i], "eraser flip phase at " + i);
+            check(sample.tool == (i <= 12 ? PenSample.ERASER : PenSample.PEN), "eraser flip tool at " + i);
+            check(sample.pressure == pressures[i], "non-contact raw pressure is discarded at " + i);
+            check(sample.buttons == (i == 3 || i == 8 ? 1 : i == 14 ? 2 : 0), "buttons remain independent metadata at " + i);
+            check(sample.sequence == i + 1 && sample.timeNanos == (1000L + i * 4) * 1000000L,
+                "eraser history and lifecycle retain sequence/time at " + i);
+        }
+        samples.clear();
+        PenInput adapter = new PenInput(samples::add);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 2000, .8f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_HOVER_MOVE, 2004, .9f, 0, 0), 1001, 1001);
+        check(samples.size() == 2 && samples.get(0).tool == PenSample.ERASER && samples.get(1).tool == PenSample.PEN
+            && samples.get(0).phase == PenSample.HOVER && samples.get(1).phase == PenSample.HOVER
+            && samples.get(0).pressure == 0 && samples.get(1).pressure == 0,
+            "a hover tool flip without LEAVE never starts contact");
+        adapter.onEvent(event(MotionEvent.ACTION_DOWN, 2008, .5f, 0, 0)
+            .withTool(MotionEvent.TOOL_TYPE_ERASER), 1001, 1001);
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 2012, .8f, 0, 0), 1001, 1001);
+        check(samples.size() == 4 && samples.get(3).phase == PenSample.CANCEL
+            && samples.get(3).tool == PenSample.ERASER && samples.get(3).pressure == 0,
+            "an impossible tool flip during contact safely cancels the old eraser");
+        adapter.onEvent(event(MotionEvent.ACTION_MOVE, 2016, .8f, 0, 0), 1001, 1001);
+        check(samples.size() == 4, "tool flip cannot resume a contact without a real DOWN");
+    }
     private static void contactIgnoresHoverAndForeignDevices() {
         List<PenSample> samples = new ArrayList<>(); PenInput adapter = new PenInput(samples::add);
         adapter.onEvent(event(MotionEvent.ACTION_DOWN, 1000, .5f, 0, 0), 1001, 1001);
@@ -272,6 +340,7 @@ public final class InputAdapterTest {
     public static void main(String[] args) {
         batchedStrokePreservesBeginning(); cancellationAndButtons(); unreliableTiltNeedsConsecutiveValidSamples();
         tiltHistoryAndContactOnlyDevices(); packedTiltRecoveryPreservesInputAndControls(); eraserAndButtonsAreDistinct();
+        eraserHoverAndFlipNeverInventContact();
         contactIgnoresHoverAndForeignDevices(); pointerIndicesAndUncapturedTails(); geometryAndInvalidPositions();
         invalidHoverExitReleasesButtonsAndTimestampOverflow();
         System.out.println("Android input adapter history, pointer isolation, geometry, invalid coordinates, tilt and release tests passed");

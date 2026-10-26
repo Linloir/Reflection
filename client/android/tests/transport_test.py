@@ -32,7 +32,7 @@ def read(stream):
 def send(stream, body):
     stream.sendall(struct.pack('>I', len(body)) + body)
 
-def host(listener):
+def host(listener, eraser):
     try:
         stream, _ = listener.accept()
         with stream:
@@ -42,7 +42,8 @@ def host(listener):
             send(stream, b'\x01\x03' + mac(key, b'Reflection/server/v1' + nonce))
             session = mac(key, b'Reflection/session/v1' + nonce)
             pens, pong = [], None
-            while len(pens) < 6 or pong is None:
+            expected = 17 if eraser else 6
+            while len(pens) < expected or pong is None:
                 frame = read(stream)
                 body, tag = frame[:-32], frame[-32:]
                 assert hmac.compare_digest(tag, mac(session, body))
@@ -56,14 +57,27 @@ def host(listener):
                 else:
                     assert body[1] == 0x20
                     assert json.loads(body[2:])['hostStabilization'] == 1
-            assert [p[0] for p in pens] == list(range(1, 7))
-            assert [p[9] for p in pens] == [1, 2, 2, 2, 2, 3]
-            assert all(p[10] == 1 and p[11] == 0 for p in pens)
-            assert [p[1] for p in pens] == [1000000000, 1000000000, 1000000000,
-                                          1001000000, 1002000000, 1002000000]
+            assert [p[0] for p in pens] == list(range(1, expected + 1))
+            assert all(p[11] == 0 for p in pens)
             assert all(a[1] <= b[1] for a, b in zip(pens, pens[1:]))
-            assert all(abs(p[2] - i * .1) < 1e-6 and abs(p[3] - .4) < 1e-6
-                       and abs(p[4] - (0 if i == 5 else i * .1)) < 1e-6 for i, p in enumerate(pens))
+            if eraser:
+                assert [p[9] for p in pens] == [0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 3, 0, 5, 0, 0, 0, 5]
+                assert [p[10] for p in pens] == [2] * 13 + [1] * 4
+                assert [p[8] for p in pens] == [0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0]
+                pressures = [0, 0, 0, 0, 0, .2, .4, .6, .7, .7, 0, 0, 0, 0, 0, 0, 0]
+                assert all(abs(p[4] - pressure) < 1e-6 for p, pressure in zip(pens, pressures))
+                assert all(p[4] == 0 for p in pens if p[9] in (0, 3, 5))
+                assert [p[1] for p in pens] == [(1000 + i * 4) * 1000000 for i in range(expected)]
+                positions = {1: (.11, .21), 2: (.12, .22), 6: (.13, .23), 7: (.14, .24)}
+                assert all(abs(p[2] - positions.get(i, (.1, .2))[0]) < 1e-6
+                           and abs(p[3] - positions.get(i, (.1, .2))[1]) < 1e-6 for i, p in enumerate(pens))
+            else:
+                assert [p[9] for p in pens] == [1, 2, 2, 2, 2, 3]
+                assert all(p[10] == 1 for p in pens)
+                assert [p[1] for p in pens] == [1000000000, 1000000000, 1000000000,
+                                              1001000000, 1002000000, 1002000000]
+                assert all(abs(p[2] - i * .1) < 1e-6 and abs(p[3] - .4) < 1e-6
+                           and abs(p[4] - (0 if i == 5 else i * .1)) < 1e-6 for i, p in enumerate(pens))
             send(stream, pong)
             # A replayed authenticated heartbeat must close the current session.
             while stream.recv(4096):
@@ -71,15 +85,19 @@ def host(listener):
     except BaseException as error:
         errors.append(error)
 
-with socket.socket() as listener:
-    listener.bind(('127.0.0.1', 0))
-    listener.listen(1)
-    listener.settimeout(8)
-    thread = threading.Thread(target=host, args=(listener,), daemon=True)
-    thread.start()
-    result = subprocess.run(['java', '-cp', str(root / 'build/tests'), 'TransportProbe', str(listener.getsockname()[1])], timeout=10)
-    thread.join(6)
-    assert not thread.is_alive(), 'Host test thread did not finish'
-    if errors:
-        raise errors[0]
-    assert result.returncode == 0
+for eraser in (False, True):
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        listener.settimeout(8)
+        thread = threading.Thread(target=host, args=(listener, eraser), daemon=True)
+        thread.start()
+        args = ['java', '-cp', str(root / 'build/tests'), 'TransportProbe', str(listener.getsockname()[1])]
+        if eraser:
+            args.append('eraser')
+        result = subprocess.run(args, timeout=10)
+        thread.join(6)
+        assert not thread.is_alive(), 'Host test thread did not finish'
+        if errors:
+            raise errors[0]
+        assert result.returncode == 0
