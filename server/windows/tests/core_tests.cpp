@@ -214,10 +214,13 @@ int main() {
         require(list_profiles(path) == std::vector<std::string>{"Drawing"}, "profile listing");
         reject([&] { save_profile(config, path, "Drawing"); }, "profile overwrite requires explicit replace");
         reject([&] { save_profile(config, path, "../secret"); }, "profile traversal rejected");
-        std::ifstream profile_file(directory / "server.conf.profiles" / "profile-Drawing.conf");
-        const std::string profile_text((std::istreambuf_iterator<char>(profile_file)), {});
-        require(profile_text.find("token") == std::string::npos && profile_text.find("bind") == std::string::npos,
-                "profiles never store pairing credentials or transport");
+        {
+            // Windows needs this read handle closed before the replacement checks below.
+            std::ifstream profile_file(directory / "server.conf.profiles" / "profile-Drawing.conf");
+            const std::string profile_text((std::istreambuf_iterator<char>(profile_file)), {});
+            require(profile_text.find("token") == std::string::npos && profile_text.find("bind") == std::string::npos,
+                    "profiles never store pairing credentials or transport");
+        }
         config.token = std::string(64, 'b'); config.bind = "0.0.0.0";
         config.mapping.pressure_curve.clear(); config.mapping.position_steps_x = 0;
         restored = load_profile(config, path, "Drawing");
