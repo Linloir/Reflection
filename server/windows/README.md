@@ -369,6 +369,22 @@ dotnet run --project server/windows/tests/desktop/Reflection.Desktop.Tests.cspro
 ```
 
 Windows CTest 另外检查配置所有权、内存状态、配置改变后的重启提示和协作停止。
+
+快速连续抬笔/落笔另有真实 Windows 注入回归测试，默认构建和 CTest 不会运行：
+
+```powershell
+cmake --build server/windows/build --config Release --target reflection_pen_injection_tests
+server/windows/build/Release/reflection_pen_injection_tests.exe --inject-into-test-window
+```
+
+先暂停正在使用的宿主及其他笔输入。测试会打开并自动关闭专用窗口，在其中注入
+1,200 笔，检查笔尖/橡皮、点按/移动、保持悬停/离开感应范围时每一笔的 DOWN/UP。
+测试区域被其他窗口覆盖时会停止。它验证 Windows 事件投递，不代替目标应用的
+实际书写验收。
+
+注入后端在突发样本间保留至少 0.1 ms 的成功注入间隔，包括保持状态和释放事件。
+这样可以避免多个合法接触边界挤入同一个原生时间片而触发错误 87；不会丢弃或
+合并 DOWN/UP。已有的 `ERROR_NOT_READY` 重试仍保留。
 Windows 桌面注入、应用实际压力/橡皮擦行为、不同 DPI/显示器组合、USB 与
 蓝牙连接、断线恢复和端到端延迟仍需要 Windows 实机验证。源码或交叉编译
 通过不能替代这些测试。建议先运行 `serve --dry-run` 确认数据，再在支持

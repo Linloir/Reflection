@@ -3,6 +3,7 @@
 #include <chrono>
 #include <limits>
 #include <sstream>
+#include <thread>
 
 namespace reflection {
 namespace {
@@ -107,7 +108,16 @@ public:
 private:
     DWORD inject_retry(const POINTER_TYPE_INFO& info) noexcept {
         for (unsigned attempt=0; attempt<4; ++attempt) {
-            if (api_.inject(device_, &info, 1)) return ERROR_SUCCESS;
+            // A TCP batch can put valid DOWN/UP transitions in the same native
+            // timestamp slot. Windows may reject these with ERROR_INVALID_PARAMETER
+            // (not just ERROR_NOT_READY), which also cancels the active contact.
+            // Pace before injection; retrying that error cannot restore a lost stroke.
+            const auto earliest=last_api_success_+std::chrono::microseconds(100);
+            while(std::chrono::steady_clock::now()<earliest) std::this_thread::yield();
+            if (api_.inject(device_, &info, 1)) {
+                last_api_success_=std::chrono::steady_clock::now();
+                return ERROR_SUCCESS;
+            }
             const DWORD error=GetLastError();
             if(error!=ERROR_NOT_READY || attempt==3) return error;
             // Re-submit the exact frame; advancing past it would lose DOWN/UP ordering.
@@ -147,6 +157,7 @@ private:
     bool in_range_ = false, contact_ = false, eraser_ = false;
     Phase last_phase_ = Phase::exit;
     std::chrono::steady_clock::time_point last_injected_{};
+    std::chrono::steady_clock::time_point last_api_success_{};
     std::chrono::steady_clock::time_point last_real_success_{};
     bool last_native_keepalive_=false;
     uint64_t last_source_time_=0;

@@ -43,6 +43,10 @@ if(WIN32)
         add_executable(reflection_native_touchpad_tests tests/native_touchpad_tests.cpp)
         target_link_libraries(reflection_native_touchpad_tests PRIVATE reflection_windows)
         add_test(NAME reflection_native_touchpad_tests COMMAND reflection_native_touchpad_tests)
+        # This opens a dedicated window and injects real pen input. Never run it
+        # as part of ordinary builds or headless CTest jobs.
+        add_executable(reflection_pen_injection_tests EXCLUDE_FROM_ALL tests/pen_injection_tests.cpp)
+        target_link_libraries(reflection_pen_injection_tests PRIVATE reflection_windows)
     endif()
     install(TARGETS reflection-host RUNTIME DESTINATION bin)
 endif()
