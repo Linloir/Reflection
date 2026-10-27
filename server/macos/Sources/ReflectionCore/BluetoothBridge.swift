@@ -8,26 +8,64 @@ public final class BluetoothBridge: NSObject {
     public static let serviceUUID = "7b011e5a-8b31-4c40-8d7a-3e6c6dcbb758"
     private var record: IOBluetoothSDPServiceRecord?
     private var notification: IOBluetoothUserNotification?
-    private var session: BluetoothRelaySession?
+    private var sessions: [UUID: BluetoothRelaySession] = [:]
     private let host: String
     private let port: UInt16
     private let log: (String) -> Void
+    private let serviceIdentifier: String
+    private let maximumSessions: Int
+    private let requireBonded: Bool
+    private var running = false
+    private var recoveryWork: DispatchWorkItem?
+    private var recoveryGeneration: UInt64 = 0
+    private var retryDelay: TimeInterval = 1
+    private var lastFailure = ""
     public private(set) var channelID: BluetoothRFCOMMChannelID = 0
 
-    public init(host: String, port: UInt16, log: @escaping (String) -> Void = { print($0) }) {
+    public init(host: String, port: UInt16, serviceIdentifier: String = BluetoothBridge.serviceUUID,
+                maximumSessions: Int = 1, requireBonded: Bool = false,
+                log: @escaping (String) -> Void = { print($0) }) {
         self.host = host == "0.0.0.0" ? "127.0.0.1" : (host == "::" ? "::1" : host)
         self.port = port
         self.log = log
+        self.serviceIdentifier = serviceIdentifier
+        self.maximumSessions = maximumSessions
+        self.requireBonded = requireBonded
     }
 
     public static var controllerAvailable: Bool {
         IOBluetoothHostController.default() != nil
     }
 
-    /// Call on a thread with an active CFRunLoop, normally the application's main thread.
+    /// Call start and stop on the main thread. Retain the bridge after a startup
+    /// error: it retries until stopped when the controller or permission recovers.
     public func start() throws {
-        guard Self.controllerAvailable else { throw ReflectionError.invalid("No Bluetooth controller available") }
-        var uuid = UUID(uuidString: Self.serviceUUID)!.uuid
+        guard !running else { return }
+        guard UUID(uuidString: serviceIdentifier) != nil else { throw ReflectionError.invalid("Invalid Bluetooth service UUID") }
+        running = true
+        try startService()
+    }
+
+    private static var controllerPowered: Bool {
+        IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON
+    }
+
+    private func startService() throws {
+        do {
+            try publishService()
+            retryDelay = 1
+            lastFailure = ""
+            scheduleRecovery(after: 5)
+        } catch {
+            releaseService()
+            retry(after: error)
+            throw error
+        }
+    }
+
+    private func publishService() throws {
+        guard Self.controllerPowered else { throw ReflectionError.invalid("Bluetooth controller is unavailable or powered off") }
+        guard var uuid = UUID(uuidString: serviceIdentifier)?.uuid else { throw ReflectionError.invalid("Invalid Bluetooth service UUID") }
         let uuidData = withUnsafeBytes(of: &uuid) { Data($0) }
         let dictionary: [String: Any] = [
             "0001 - ServiceClassIDList": [uuidData],
@@ -36,7 +74,7 @@ public final class BluetoothBridge: NSObject {
                 [Data([0x00, 0x03]), ["DataElementType": 1, "DataElementSize": 1, "DataElementValue": 1]]
             ],
             "0005 - BrowseGroupList": [Data([0x10, 0x02])],
-            "0100 - ServiceName": "Reflection Tablet",
+            "0100 - ServiceName": requireBonded ? "Reflection Pairing" : "Reflection Tablet",
             "LocalAttributes": ["Persistent": false]
         ]
         guard let record = IOBluetoothSDPServiceRecord.publishedServiceRecord(with: dictionary) else {
@@ -44,34 +82,86 @@ public final class BluetoothBridge: NSObject {
         }
         self.record = record
         guard record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess, channelID > 0 else {
-            stop()
             throw ReflectionError.invalid("Bluetooth RFCOMM channel allocation failed")
         }
         notification = IOBluetoothRFCOMMChannel.register(
             forChannelOpenNotifications: self, selector: #selector(opened(_:channel:)),
             withChannelID: channelID, direction: kIOBluetoothUserNotificationChannelDirectionIncoming)
         guard notification != nil else {
-            stop()
             throw ReflectionError.invalid("Bluetooth RFCOMM listener registration failed")
         }
-        log("{\"event\":\"bluetooth_listening\",\"channel\":\(channelID),\"uuid\":\"\(Self.serviceUUID)\"}")
+        log("{\"event\":\"bluetooth_listening\",\"channel\":\(channelID),\"uuid\":\"\(serviceIdentifier)\"}")
     }
 
     public func stop() {
+        running = false
+        recoveryGeneration &+= 1
+        recoveryWork?.cancel()
+        recoveryWork = nil
+        retryDelay = 1
+        lastFailure = ""
+        releaseService()
+    }
+
+    private func scheduleRecovery(after delay: TimeInterval) {
+        guard running else { return }
+        recoveryWork?.cancel()
+        recoveryGeneration &+= 1
+        let generation = recoveryGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.running, self.recoveryGeneration == generation else { return }
+            self.recoveryWork = nil
+            if self.notification != nil {
+                if Self.controllerPowered { self.scheduleRecovery(after: 5); return }
+                self.releaseService()
+                self.retry(after: ReflectionError.invalid("Bluetooth controller is unavailable or powered off"))
+            } else {
+                try? self.startService()
+            }
+        }
+        recoveryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func retry(after error: Error) {
+        let delay = retryDelay
+        retryDelay = min(30, retryDelay * 2)
+        let reason = String(describing: error)
+        if reason != lastFailure {
+            lastFailure = reason
+            if let data = try? JSONSerialization.data(withJSONObject: [
+                "event": "bluetooth_waiting", "uuid": serviceIdentifier,
+                "reason": reason, "retrySeconds": delay
+            ]), let message = String(data: data, encoding: .utf8) {
+                log(message)
+            }
+        }
+        scheduleRecovery(after: delay)
+    }
+
+    private func releaseService() {
         notification?.unregister()
         notification = nil
-        session?.close()
-        session = nil
+        for session in sessions.values { session.close() }
+        sessions.removeAll()
         _ = record?.remove()
         record = nil
+        channelID = 0
     }
 
     @objc private func opened(_ notification: IOBluetoothUserNotification, channel: IOBluetoothRFCOMMChannel) {
-        guard session == nil else { channel.close(); return }
-        let relay = BluetoothRelaySession(channel: channel, host: host, port: port) { [weak self] in
-            DispatchQueue.main.async { self?.session = nil }
+        guard running, self.notification === notification else { channel.close(); return }
+        guard sessions.count < maximumSessions else { channel.close(); return }
+        if requireBonded {
+            guard let device = channel.getDevice(), device.isPaired(), device.getEncryptionMode() != 0 else {
+                channel.close(); return
+            }
         }
-        session = relay
+        let id = UUID()
+        let relay = BluetoothRelaySession(channel: channel, host: host, port: port) { [weak self] in
+            DispatchQueue.main.async { self?.sessions.removeValue(forKey: id) }
+        }
+        sessions[id] = relay
         relay.start()
     }
 

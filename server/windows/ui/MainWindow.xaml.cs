@@ -28,6 +28,8 @@ public sealed partial class MainWindow : Window
     private JsonElement? mappingState;
     private string mappingSignature = "";
     private bool mappingAvailable;
+    private List<NearbyTablet> nearbyTablets = [];
+    private string pairingSignature = "";
     private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
 
     public MainWindow()
@@ -184,6 +186,7 @@ public sealed partial class MainWindow : Window
         StartButton.IsEnabled = !running;
         StopButton.IsEnabled = running;
         UpdateStability(state);
+        await RefreshPairingAsync();
         try { UpdateMapping(await host.RunAsync("mapping", "status")); }
         catch (InvalidOperationException error)
         {
@@ -192,6 +195,80 @@ public sealed partial class MainWindow : Window
             MappingDetail.Text = error.Message;
         }
     }
+
+    private async Task RefreshPairingAsync()
+    {
+        EnableLan.Visibility = loadedValues.GetValueOrDefault("bind") == "127.0.0.1" ? Visibility.Visible : Visibility.Collapsed;
+        if (!running)
+        {
+            PairingStatus.Text = "Start the host to discover tablets.";
+            nearbyTablets = []; NearbyTablets.ItemsSource = nearbyTablets; pairingSignature = "";
+            return;
+        }
+        try
+        {
+            var devices = await host.RunAsync("pairing", "list");
+            if (closed) return;
+            var signature = devices.GetRawText();
+            if (signature != pairingSignature)
+            {
+                pairingSignature = signature;
+                nearbyTablets = devices.EnumerateArray().Select(value => new NearbyTablet(
+                    value.GetProperty("id").GetString()!, value.GetProperty("name").GetString()!,
+                    value.GetProperty("address").GetString()!, value.GetProperty("code").GetString()!,
+                    value.GetProperty("trusted").GetBoolean())).ToList();
+                NearbyTablets.ItemsSource = nearbyTablets;
+            }
+            PairingStatus.Text = nearbyTablets.Count == 0
+                ? "Looking for tablets. Keep Reflection open on the tablet."
+                : $"{nearbyTablets.Count} nearby tablet(s). Select the one you want to use.";
+            if (loadedValues.GetValueOrDefault("bind") == "127.0.0.1")
+                PairingStatus.Text += "\nLAN discovery is disabled in this saved configuration; USB and paired Bluetooth remain available.";
+        }
+        catch (Exception error) { if (!closed) PairingStatus.Text = error.Message; }
+    }
+
+    private async void TrustTablet_Click(object sender, RoutedEventArgs e) => await PerformAsync(async () =>
+    {
+        if (sender is not Button { Tag: string id }) return;
+        var tablet = nearbyTablets.FirstOrDefault(value => value.Id == id);
+        if (tablet is null) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot, Title = $"Connect {tablet.Name}?",
+            Content = $"Check that the tablet displays {tablet.Code}.\n\nAddress: {tablet.Address}\nApproval connects this tablet and releases the current tablet session.",
+            PrimaryButtonText = "Code matches - trust and connect", CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        var result = await host.RunAsync("pairing", "trust", tablet.Id);
+        if (result.TryGetProperty("usbSelected", out var usbSelected) && usbSelected.GetBoolean())
+        {
+            ShowNotice($"{tablet.Name} selected over its authorized USB connection.");
+            await RefreshPairingAsync();
+            return;
+        }
+        var confirmationCode = result.GetProperty("confirmationCode").GetString();
+        var confirmation = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot, Title = $"Confirm on {tablet.Name}",
+            Content = $"Connection code: {confirmationCode}\n\nOnly approve the computer on the tablet if it shows this same connection code.",
+            CloseButtonText = "Done", DefaultButton = ContentDialogButton.Close
+        };
+        await confirmation.ShowAsync();
+        await RefreshPairingAsync();
+    });
+
+    private async void EnableLan_Click(object sender, RoutedEventArgs e) => await PerformAsync(async () =>
+    {
+        var snapshot = await host.SnapshotAsync();
+        await host.ApplyAsync(new Dictionary<string, string> { ["bind"] = "0.0.0.0" }, snapshot.Revision);
+        Bind.Text = "0.0.0.0"; loadedValues["bind"] = "0.0.0.0";
+        revision = (await host.SnapshotAsync()).Revision;
+        if (running) await host.StopAsync();
+        await host.StartAsync(DryRun.IsChecked == true);
+        await RefreshStatusAsync();
+    });
 
     private Dictionary<string, string> CollectSettings()
     {

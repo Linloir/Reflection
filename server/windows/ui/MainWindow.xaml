@@ -181,17 +181,39 @@
                            TextWrapping="Wrap" FontSize="12" />
               </StackPanel>
             </Expander>
-            <Expander Header="Connection and pairing" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+            <Expander Header="Nearby tablets" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="12">
-                <ComboBox x:Name="Transport" Header="Transport" SelectedIndex="0">
-                  <ComboBoxItem Content="tcp" /><ComboBoxItem Content="bluetooth" />
-                </ComboBox>
-                <TextBox x:Name="Bind" Header="TCP bind IPv4 address" />
-                <NumberBox x:Name="Port" Header="TCP port" Minimum="1" Maximum="65535" Value="24819" />
-                <PasswordBox x:Name="Token" Header="Pairing key (leave blank to keep current)" PasswordRevealMode="Hidden" />
-                <Button Content="Copy pairing key" Click="Pairing_Click" />
-                <TextBlock Text="USB: use adb reverse tcp:24819 tcp:24819 with 127.0.0.1. Wi-Fi: bind to your LAN IPv4 address. Bluetooth: pair both devices in system settings first."
+                <TextBlock Text="Open Reflection on an authorized USB tablet, the same local network, or paired Bluetooth. Choose it here and compare the tablet's six-digit device code. USB selection uses the authorized cable; Wi-Fi and Bluetooth also ask you to confirm a connection code on the tablet. Connections then use USB, Wi-Fi, or Bluetooth in that order."
                            TextWrapping="Wrap" FontSize="12" />
+                <TextBlock x:Name="PairingStatus" Text="Start the host to discover tablets." TextWrapping="Wrap" />
+                <ItemsControl x:Name="NearbyTablets">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid ColumnSpacing="12" Padding="0,10" BorderThickness="0,0,0,1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <StackPanel Spacing="3">
+                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                          <TextBlock Text="{Binding Detail}" FontSize="12" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="{Binding Action}" Tag="{Binding Id}" Click="TrustTablet_Click" VerticalAlignment="Center" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Button x:Name="EnableLan" Content="Allow LAN discovery and restart host" Click="EnableLan_Click" Visibility="Collapsed" />
+                <TextBlock Text="USB setup is included in this application. Enable USB debugging on the tablet and accept Android's computer authorization. Pair Bluetooth once in system settings to use the wireless fallback."
+                           TextWrapping="Wrap" FontSize="12" />
+                <Expander Header="Advanced connection settings" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                  <StackPanel Spacing="10">
+                    <ComboBox x:Name="Transport" Header="Legacy transport preference" SelectedIndex="0">
+                      <ComboBoxItem Content="tcp" /><ComboBoxItem Content="bluetooth" />
+                    </ComboBox>
+                    <TextBox x:Name="Bind" Header="TCP bind IPv4 address" />
+                    <NumberBox x:Name="Port" Header="TCP port" Minimum="1" Maximum="65535" Value="24819" />
+                    <PasswordBox x:Name="Token" Header="Legacy pairing key (leave blank to keep current)" PasswordRevealMode="Hidden" />
+                    <Button Content="Copy legacy pairing key" Click="Pairing_Click" />
+                  </StackPanel>
+                </Expander>
               </StackPanel>
             </Expander>
             <Expander Header="Session log" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">

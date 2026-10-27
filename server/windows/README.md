@@ -8,7 +8,7 @@ API，将平板笔事件作为 `PT_PEN` 输入送入当前桌面。桌面应用�
 ## 系统要求与兼容范围
 
 - Windows 10 1809 或更新版本、Windows 11；在交互式用户会话中运行。
-- USB 模式需要 Android Platform Tools 和已授权的 USB 调试。
+- USB 模式需要已授权的 USB 调试；桌面发行包包含 Android Platform-Tools，用户无需另行安装 ADB。
 - Wi-Fi 模式需要平板可以访问宿主机的监听 IPv4 地址及端口。
 - 蓝牙模式需要支持 Bluetooth Classic RFCOMM 的适配器、驱动和已配对设备。
 - 目标绘画程序需要支持 Windows Ink / Pointer 输入。只使用 WinTab 的应用
@@ -18,7 +18,21 @@ API，将平板笔事件作为 `PT_PEN` 输入送入当前桌面。桌面应用�
 是 **0..1024**，因此这一后端不能承诺将 4096 个压力档位原样呈现给应用。
 倾斜映射为 Windows 的 -90..90 整数角度，支持悬停、笔尖、橡皮擦和主侧键。
 协议中的第二侧键和悬停距离会接收并验证，但当前系统后端没有对应输出。
-不支持触摸手势、双指缩放、多笔同时输入或硬件笔旋转轴。
+可选触摸板在支持公开 `CreateSyntheticPointerDevice2` 接口的 Windows 11 构建上，
+接收最多五个原始触点，由 Windows 识别点击、滚动、缩放和多指手势。宿主先根据
+客户端提供的物理尺寸创建原生触摸板，成功后才确认这一能力。未提供接口、创建失败、
+关闭原生后端或使用 dry-run 时，自动使用 `SendInput` 鼠标/滚轮与快捷键兼容路径。
+兼容路径支持指针、单指左键、双指右键、滚动，以及缩放和窗口/桌面切换快捷键；
+它不能复现所有应用的原生缩放/旋转或自定义触摸板绑定。
+不支持多笔同时输入或硬件笔旋转轴。原生触摸板代码及协议已实现，真实 Windows
+机器上的手势识别和应用兼容性仍待验证，不能据此承诺所有 Windows 11 构建可用。
+公开 API 的系统限制与实现、验证状态见
+[原生触摸板可行性](../../docs/native-touchpad-feasibility.md)。
+
+`reflection-host config set touchpad.native false` 可强制使用兼容后端，重新启动宿主后生效。
+`doctor` 的 `nativeTouchpadApiAvailable` 只检查公开入口是否存在；连接日志中的
+`native_touchpad_enabled` 才表示设备创建成功，`native_touchpad_unavailable` 给出回退原因。
+dry-run 不创建或注入原生触摸板设备。
 
 管理员权限、受保护窗口、安全桌面、远程会话和各个应用的输入策略会影响
 注入结果。`doctor` 检查 API 可用性，并不等于目标程序已经通过实际绘图测试。
@@ -56,6 +70,11 @@ cmake --install server/windows/build --config Release --prefix "$env:LOCALAPPDAT
 ./server/windows/build/ui/Reflection.Desktop.exe
 ```
 
+构建机需要官方 Android Platform-Tools。脚本从 `REFLECTION_PLATFORM_TOOLS`、
+`ANDROID_SDK_ROOT`、`ANDROID_HOME`，最后从 `%LOCALAPPDATA%\Android\Sdk\platform-tools`
+查找，并把 `adb.exe`、两份 USB DLL、NOTICE 和版本信息复制到发行目录。
+缺失任一必需文件会使打包失败，避免发布依赖用户预装 ADB 的应用。
+
 脚本构建 C++ 宿主及 WinUI 项目，并将宿主、.NET 运行时和 Windows App SDK
 一起发布到 `server/windows/build/ui/`。分发和安装时保留**整个目录**，
 不要只复制界面的 `.exe`。支持 `-Architecture ARM64`；构建 ARM64 原生宿主
@@ -79,8 +98,25 @@ Windows 10 使用当前系统主题的实色背景和 WinUI 控件。没有直�
 DWM API。系统材质会尊重系统设置与回退条件。UI 可替换，后台输入保持 C++。
 关闭窗口会停止该窗口启动的宿主；通过终端启动的宿主继续运行。
 
-配对字段默认隐藏。只有点击“Copy pairing key”时才显式读取密钥并复制到剪贴板，
-日志不会显示密钥。普通 UI 读取配置也不会取回密钥。
+“Nearby tablets” 自动列出已授权 USB、同一局域网内、或已通过系统配对的蓝牙中打开 Reflection 的平板。核对平板显示的
+六位设备码后点击“Trust and connect”，然后对照电脑新显示的连接码，在平板上确认。
+USB 设备通过已授权的连接直接完成选择，不需要第二次连接码确认；后台 USB
+续租不会替换已有宿主机选择，重新选择时必须点击对应平板的连接按钮。
+动态连接码由本次随机挑战和派生凭据计算，不出现在明文 UDP 响应里。宿主只向选中
+平板的 RSA 公钥加密发送独立配对凭据；设备名称和密钥摘要不构成自动授权。
+可记住多台平板；选中另一台时先释放当前笔和触摸会话。配对密钥保留在高级设置中，
+普通日志和界面轮询不会读取或显示密钥。
+首次信任可以完全通过蓝牙完成，无需先使用 USB 或局域网。配对使用独立的安全
+RFCOMM 服务 `7b011e5a-8b31-4c40-8d7a-3e6c6dcbb759`，平板短轮询获取加密授权，
+不会占用笔输入服务。连接码仍只在双方本地显示，并由用户核对后确认。
+首次配对帧为大端长度前缀、版本 `1`、请求类型 `0x04` 与设备声明；响应类型
+为 `0x05`，返回待确认状态或 RSA-OAEP-SHA256 加密授权。该服务不接受笔或
+触摸输入，输入仍通过原有服务完成 HMAC 认证。缓存授权仅匹配同一设备与随机
+挑战，发现超时或挑战改变就失效；UDP 丢包时由后续发现请求重新获取。
+
+可移植测试覆盖协议与输入状态验证，Windows 交叉编译验证 C++ 宿主的编译和
+链接。蓝牙适配器、系统配对、USB 驱动与目标绘图程序仍需在真实 Windows
+硬件上验证；交叉编译不能证明这些运行时行为。
 
 ## CLI
 
@@ -100,9 +136,23 @@ reflection-host serve --dry-run
 `init` 生成随机配对密钥，已有配置不会被覆盖。默认配置路径为
 `%LOCALAPPDATA%\Reflection\server.conf`，也可在任何命令中使用
 `--config PATH` 指定独立配置。配置文件是 `key=value` 文本。
+新配置默认监听 `0.0.0.0`，覆盖各个本地 IPv4 网络接口；UDP `24820` 用于发现。
+已有明确的监听地址保留。旧配置只监听 `127.0.0.1` 时，界面提供允许局域网发现并
+重启的按钮。Windows 防火墙需要允许所用本地网络的 TCP 输入端口和 UDP 发现端口。
+
+```powershell
+reflection-host pairing list
+reflection-host pairing trust TABLET_ID
+```
+
+`pairing list` 返回名称、地址、身份摘要、核对码和是否已信任，不包含凭据。
+`pairing trust` 必须由用户核对设备后调用；它发送加密授权并选择该平板。
+已信任设备摘要保存在配置旁的 `.devices` 文件。选择只在当前宿主进程有效；
+重启后允许已信任平板自动连接。更改宿主根密钥会使之前发放的派生凭据失效。
 
 `serve --dry-run` 接收、认证、验证、映射事件并输出笔划边界诊断，不操作
-系统指针。去掉 `--dry-run` 后启用真实笔输入。`start` 是 `serve` 的别名，
+系统指针，也不自动配置 USB 设备；保留局域网和蓝牙发现供诊断使用。
+去掉 `--dry-run` 后启用真实笔输入。`start` 是 `serve` 的别名，
 两者都在前台运行，按 Ctrl+C 或从另一个终端运行 `reflection-host stop` 停止。
 `stop` 使用当前配置对应的本地命名事件进行协作停止，不会终止任意 PID。
 同一配置只允许一个宿主。当前不包含系统服务安装或登录时自动启动。
@@ -129,14 +179,16 @@ UI 使用 `config snapshot` 读取隐藏密钥的配置及不透明 `revision`�
 
 ### USB
 
-保持默认监听地址 `127.0.0.1`，运行：
+打包的桌面应用会自动寻找已通过 Android 授权的物理 USB 设备，设置 reverse，
+获取客户端身份并发放相应凭据。首次插线仍需在 Android 上确认 USB 调试授权。
+手动诊断时仍可运行：
 
 ```powershell
 adb reverse tcp:24819 tcp:24819
 reflection-host serve
 ```
 
-平板端使用 TCP 地址 `127.0.0.1:24819` 和相同配对密钥。USB 是通过 ADB
+平板端自动使用 TCP 地址 `127.0.0.1:24819`。USB 是通过 ADB
 reverse 转发有序字节流，不要求 Android 支持 USB HID gadget。
 首次连接需要在平板上确认 USB 调试授权；部分设备也需要厂商 USB 驱动。
 拔线后宿主端会在断开或两秒超时后释放笔状态。
@@ -322,6 +374,47 @@ Windows 桌面注入、应用实际压力/橡皮擦行为、不同 DPI/显示器
 通过不能替代这些测试。建议先运行 `serve --dry-run` 确认数据，再在支持
 Windows Ink 的绘画程序里测试逐渐加压、悬停、翻转橡皮擦、侧键和拔线。
 
+### 隔离验证脚本
+
+在 Windows 的 Developer PowerShell 中，可以通过一次运行收集系统版本、系统与
+进程架构、工具版本、源码 SHA-256、原生构建、CTest 和宿主 dry-run 集成结果：
+
+```powershell
+& "C:\src\reflection\server\windows\scripts\validate-isolated.ps1" `
+    -SourceDirectory "C:\src\reflection" -Architecture Auto
+```
+
+需要 CMake、Visual Studio C++ 工具链、Windows SDK 和 Python 3；ARM64 系统默认
+选择 ARM64，并需要对应的 C++ 工具链。脚本不安装缺失工具。默认在 `%TEMP%`
+下创建独立目录，也可以明确指定两个尚不存在或为空的目录：
+
+```powershell
+& "C:\src\reflection\server\windows\scripts\validate-isolated.ps1" `
+    -SourceDirectory "C:\src\reflection" `
+    -BuildDirectory "C:\ReflectionValidation\run-01\build" `
+    -OutputDirectory "C:\ReflectionValidation\run-01\results" `
+    -IncludeWinUI -ProbeNativeDevice
+```
+
+`-IncludeWinUI` 还需要 .NET 10 SDK，会构建 WinUI、检查 XAML 资源并运行桌面
+进程生命周期测试，但不启动真实桌面界面。这里的 WinUI 输出仅用于构建验证，
+未打包 ADB；制作完整发行包仍使用 `build-ui.ps1`。
+`-ProbeNativeDevice` 额外检查公开触摸板 API，并尝试创建后立即释放设备，始终
+不提交触点；它不能验证实际手势识别。默认 CTest 只检查触点帧和 dry-run 行为，
+不创建原生触摸板设备。
+
+脚本复制必要源码到独立构建目录，保持原仓库的生成目录和用户宿主配置不变。
+宿主集成检查使用临时配置、临时端口和进程级 `REFLECTION_TEST_ISOLATED=1`：
+仅在 `serve --dry-run` 时强制回环 TCP，关闭自动发现及 ADB 配置；真实输入
+模式忽略该环境变量。脚本不启动已有宿主，不发送真实笔或触摸输入，也不修改
+防火墙、系统设置或软件安装状态；NuGet 恢复与构建缓存位于独立构建目录。
+
+输出目录中的 `validation.json` 为每个步骤记录 `pass`、`fail`、`unavailable`
+或 `skipped`，并保留标准输出、错误输出及耗时。未请求的可选检查不影响整体状态；
+缺失必要工具或依赖会使整体为 `unavailable`，不会被报告为通过。退出码为
+`0`（通过）、`1`（失败）或 `2`（不可用）。日志和构建目录保留，方便复查；
+非 Windows 系统只生成不可用报告，不执行构建或输入检查。
+
 ## 电脑端防抖与压感编辑
 
 桌面 **Pen stability** 管理开关、强度和高级参数，显示突跳保护计数。
@@ -338,6 +431,10 @@ Windows Ink 的绘画程序里测试逐渐加压、悬停、翻转橡皮擦、�
 原生构建、CTest 和 WinUI 加点/拖动验收通过。实际 Inkodo 书写仍须使用物理笔检查。
 
 ## 官方接口资料
+
+自动发现、每设备授权、USB 自动配置和触摸板扩展新增了跨平台协议/状态检查。
+这些检查不等于新增 Windows WinUI、BCrypt、ADB DLL 和实际系统输入已经通过
+Windows 实机验证；发布前应在 Windows 上重新执行原生 CTest 和连接/断线验收。
 
 橡皮擦的工具身份与接触状态分别报告：翻转悬浮只设置 `PEN_FLAG_INVERTED`，
 真正接触时才同时设置 `PEN_FLAG_ERASER`。抬起、取消、退出和悬浮保活都清除

@@ -24,6 +24,7 @@ public:
     void begin_session(bool raw_coordinates = false);
     void negotiate(bool raw_coordinates);
     void end_session();
+    double set_session_noise(double noise);
     std::optional<Sample> process(const Sample& raw);
     bool take_release();
     std::string calibration(unsigned action, const std::function<void(double)>& persist = {});
@@ -32,6 +33,7 @@ public:
 private:
     std::mutex mutex_;
     StabilizationConfig config_;
+    std::optional<double> session_noise_default_;
     bool connected_ = false, raw_ = false, contact_ = false, suppressed_ = false, anchored_ = false;
     bool release_ = false, filter_ready_ = false;
     bool fresh_down_ = false;

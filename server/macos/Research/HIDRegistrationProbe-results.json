@@ -1,0 +1,57 @@
+{
+  "checkedOn": "2026-10-27",
+  "operatingSystem": "macOS 27.0.1",
+  "operatingSystemBuild": "26A434",
+  "source": "HIDRegistrationProbe.swift",
+  "candidate": {
+    "source": "Apple Accessory Design Guidelines, 2026-09-21, section 15.2.1, pages 110-113",
+    "applicability": "The document explicitly specifies iPadOS 14.5 and later, not macOS native gesture compatibility",
+    "descriptorBytes": 324,
+    "sha256": "2546d5a2fbe726322c6547e95aa8b213455003ba2f9ac9170ddfc4454b3819f0"
+  },
+  "ordinaryAdHocExecutable": {
+    "exitStatus": 0,
+    "controlRegistered": false,
+    "candidateRegistered": false,
+    "activated": false,
+    "inputReportsSent": 0,
+    "systemLog": "com.apple.iohid:userdevice IOServiceOpen:0xe00002c2",
+    "statusName": "kIOReturnBadArgument",
+    "limitation": "The public initializer returns nil without exposing the precise cause; this result alone does not establish an entitlement failure"
+  },
+  "isolatedAdHocCopyWithPublicEntitlement": {
+    "entitlements": {
+      "com.apple.developer.hid.virtual.device": true
+    },
+    "codesignExitStatus": 0,
+    "codesignStrictVerificationExitStatus": 0,
+    "launchReturnCode": -9,
+    "launchSignal": "SIGKILL",
+    "probeEntered": false,
+    "amfidErrorDomain": "AppleMobileFileIntegrityError",
+    "amfidErrorCode": -424,
+    "amfidReason": "The file is adhoc signed but contains restricted entitlements",
+    "kernelReason": "Code has restricted entitlements, but the validation of its code signature failed"
+  },
+  "existingSigningPrerequisites": {
+    "identityQuerySucceeded": true,
+    "validCodeSigningIdentities": 0,
+    "standardProfileDirectoriesPresent": 0,
+    "profilesFound": 0,
+    "profilesDecoded": 0,
+    "profilesGrantingVirtualHID": 0,
+    "unexpiredMacProfilesGrantingVirtualHID": 0,
+    "profilesWithMatchingValidSigningIdentity": 0,
+    "scope": "Standard user Xcode and user/system MobileDevice provisioning-profile directories only"
+  },
+  "changesMade": [
+    "Compiled the isolated probe in a temporary directory",
+    "Ad-hoc signed a separate temporary executable copy with the public virtual-HID entitlement"
+  ],
+  "applicationModified": false,
+  "systemSecuritySettingsModified": false,
+  "accountOrProvisioningModified": false,
+  "driversInstalled": false,
+  "inputReportsSent": 0,
+  "nativeGestureSupportVerified": false
+}

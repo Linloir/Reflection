@@ -185,6 +185,13 @@ int main() {
             });
             contender.join();
             require(rejected, "configuration ownership rejects another host thread");
+            require(HostRuntime::pairing_request(path) == "[]",
+                    "asynchronous pairing controls return without enabling discovery in tests");
+            bool pairing_rejected = false;
+            try { HostRuntime::pairing_request(path, std::string(32, 'a')); }
+            catch (const std::exception&) { pairing_rejected = true; }
+            require(pairing_rejected && HostRuntime::pairing_request(path) == "[]" && running.load(),
+                    "failed asynchronous trust completes its request and leaves the host responsive");
             const auto before_switch = config_revision(load_config(path));
             require(HostRuntime::mapping_request(path, 1).find("\"mode\":\"display\"") != std::string::npos,
                     "live local command switches to a display");

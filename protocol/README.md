@@ -9,6 +9,90 @@ The default TCP port is `24819`. The Bluetooth Classic service UUID is
 `7b011e5a-8b31-4c40-8d7a-3e6c6dcbb758`. USB uses the same TCP transport through
 ADB reverse forwarding; USB HID gadget mode is not required.
 
+## Optional touchpad input
+
+An updated client advertises `"touchpad":1` in its existing capabilities frame
+(`0x20`). A supporting host replies once with signed type `0x24`, whose payload
+is exactly one byte, `1`. The client must receive that acknowledgement before
+sending touchpad commands. Older hosts continue to receive only pen input.
+
+Type `0x23` is an authenticated 32-byte touchpad command:
+
+| Offset | Type | Meaning |
+| ---: | --- | --- |
+| 0 | u64 | Independent touchpad sequence, starting at 1 |
+| 8 | u64 | Monotonic client timestamp in nanoseconds |
+| 16 | f32 | X delta in density-independent pixels, or logarithmic pinch scale |
+| 20 | f32 | Y delta in density-independent pixels |
+| 24 | u8 | Gesture kind |
+| 25 | u8 | Finger count, 0..4 |
+| 26 | 6 bytes | Reserved, all zero |
+
+Kinds are `0` pointer movement, `1` left tap, `2` right tap, `3` scroll begin,
+`4` scroll update, `5` scroll end, `6` pinch zoom, `7` directional swipe,
+and `8` cancel. Movement/left tap require one finger. Right tap, scroll and
+zoom require two. Swipe requires three or four, with exactly one of X/Y equal
+to `-1` or `1` and the other zero. Cancel requires zero fingers. Tap,
+begin/end and cancel deltas must be zero. Movement/scroll deltas must be
+finite and within `-1024..1024`; zoom X is a finite natural-log scale delta
+within `-1..1`, and Y must be zero.
+
+Sequence numbers strictly increase; timestamps do not decrease. Invalid
+commands or replays terminate the session. Commands share the pen writer
+queue so they cannot reorder pen transitions. Pending commands are discarded
+on reconnect. Hosts release scrolling state on cancel, pen input and
+disconnect; click and shortcut down/up events are emitted as one operation.
+
+macOS uses public Quartz cursor, click and continuous scroll events. Windows
+uses `SendInput` mouse/wheel events. Pinch maps to application zoom shortcuts
+and multi-finger swipes map to desktop/window navigation shortcuts. This
+compatibility path does not register a physical trackpad and does not reproduce
+all application-specific magnify/rotate gestures or configurable OS trackpad
+bindings. Supporting Windows 11 builds can negotiate the independent native
+contact extension below.
+
+### Native touchpad contacts
+
+A client advertises numeric `"rawTouchpad":1`, `"rawTouchpadWidth":10000`,
+and `"rawTouchpadHeight":6000` capability fields. Width and height describe
+the touch surface in HIMETRIC units (1/100 mm); each must be an integer in
+`500..100000`. A host that successfully creates a native touchpad replies once
+with authenticated `0x28`: `u8 version=1`, `u32 width`, `u32 height` (9 bytes).
+No acknowledgement is sent when the API or device is unavailable, disabled,
+or the host is in dry-run mode. The client then retains the compatibility path.
+Older and macOS hosts ignore these optional capability fields.
+
+After that acknowledgement, `0x27` carries an authenticated full contact frame:
+
+| Offset | Type | Meaning |
+| ---: | --- | --- |
+| 0 | u64 | Independent raw-contact sequence, starting at 1 |
+| 8 | u64 | Monotonic client timestamp in nanoseconds |
+| 16 | u8 | Contact count, 1..5; zero only for cancellation |
+| 17 | u8 | Flags: `1` cancels every contact, otherwise zero |
+| 18 | 2 bytes | Reserved, zero |
+| 20 | 16 bytes each | Contact records |
+
+Each record contains `u32 id`, `u8 phase` (`1` down, `2` update, `3` up),
+`u8 confident` (`0` or `1`), two reserved zero bytes, then `f32 x` and `f32 y`.
+Coordinates are finite, normalized to `0..1`. IDs are unique within a frame.
+Every previously active contact must appear, including its final up record;
+an absent ID does not implicitly release it. Up contacts disappear from the
+next frame. A cancellation frame has no records and is exactly 20 bytes.
+
+The client chooses compatibility or native input when each gesture starts;
+it never sends both for the same gesture. A capability acknowledgement arriving
+mid-gesture affects the next gesture. Contacts are cancelled for pen proximity,
+surface changes, settings changes and disconnect. Pending frames are bound to
+their connection and never replayed after reconnect. Invalid state transitions,
+reserved bits, geometry, sequence or timestamps terminate the session.
+
+The Windows backend maps wire IDs to at most five native slots and injects
+device-relative contact states through the public `CreateSyntheticPointerDevice2`
+and `InjectSyntheticPointerInput` APIs. Windows performs gesture recognition.
+No private exports or ordinal lookups are used. Actual native gesture behavior
+still requires validation on a Windows build that exposes these APIs.
+
 ## Framing
 
 All integers and IEEE 754 binary32 values use big endian byte order.
@@ -156,8 +240,10 @@ smoothing to avoid stacking it with older Android filtering. Input continuity
 protection remains enabled for both kinds of client. This capability adds no
 wire message types or sample fields, and older hosts can ignore it.
 
-Calibration is controlled by the computer UI/CLI, not by unauthenticated network
-commands. During calibration the host receives the original samples but releases
+Host calibration is controlled by the computer UI/CLI, not by unauthenticated network
+commands. A separately negotiated tablet calibration extension can supply a
+session-only noise prior from the client's guided setup. During host calibration
+the host receives the original samples but releases
 system contact and suppresses injection. After completion or cancellation a new
 DOWN is required before contact input resumes. Changing the input device or
 surface orientation during a stroke must cancel the old stroke; it must not
@@ -208,6 +294,34 @@ means a switch is waiting for the current stroke to end. The UP sample maps
 to the old screen, and the next stroke uses the new screen. Disconnect/cancel
 also releases the stroke. Live switching does not rewrite startup settings.
 Mapping snapshots do not replace pongs or extend the client's pong deadline.
+
+### Negotiated tablet noise calibration
+
+The numeric capabilities `"tabletCalibration":1` and `"hostStabilization":1`
+opt the tablet into a session-only noise prior. The host answers with an
+authenticated `0x26` capability payload: version `u8 = 1`, sequence `u64 = 0`,
+noise `f32 = 0` (13 bytes, big-endian). The client sends no calibration request
+until this response arrives. Older hosts keep their own configured prior.
+
+`0x25` requests contain sequence `u64` and noise `f32` (12 bytes). The first
+sequence is 1 and subsequent sequences strictly increase. Noise is a finite
+normalized workspace-coordinate value in `0.00001..0.02`; zero explicitly clears
+the tablet override and restores the host's configured prior. Bounds are
+interpreted as f32 values and normalized to host configuration precision.
+NaN, infinity, incorrect lengths, replay, unnegotiated requests and requests
+during pen contact or active host calibration terminate the session.
+
+The client serializes updates between contacts, before the next queued DOWN.
+The host resets its filter estimator when applying the prior and replies with
+`0x26`: version 1, the accepted sequence, and the effective nonzero prior.
+Acknowledgements must refer to a sent request and strictly increase. Neither
+capabilities nor acknowledgements extend the heartbeat deadline.
+
+The host does not write a tablet prior to its persistent configuration. It
+restores its configured value when the session disconnects, so a second tablet
+cannot inherit the first tablet's calibration. Explicit host-side calibration
+continues to save a new host baseline. Tablet coordinates remain unsmoothed;
+the host is still the sole stabilization stage.
 
 ## Backpressure and reconnection
 

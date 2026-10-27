@@ -9,19 +9,23 @@ public final class HostControl {
     private var listener: Int32 = -1
     private var source: DispatchSourceRead?
     private let queue = DispatchQueue(label: "org.reflection.control", qos: .utility)
+    private let pairingQueue = DispatchQueue(label: "org.reflection.control.pairing", qos: .utility)
     private let onStop: () -> Void
     private let mappingCommand: ((String) throws -> Data)?
     private let calibrationCommand: ((String) throws -> Data)?
     private let statusCommand: (() throws -> Data)?
+    private let pairingCommand: ((String) throws -> Data)?
 
     public init(configurationURL: URL, mappingCommand: ((String) throws -> Data)? = nil,
                 calibrationCommand: ((String) throws -> Data)? = nil,
                 statusCommand: (() throws -> Data)? = nil,
+                pairingCommand: ((String) throws -> Data)? = nil,
                 onStop: @escaping () -> Void) throws {
         self.onStop = onStop
         self.mappingCommand = mappingCommand
         self.calibrationCommand = calibrationCommand
         self.statusCommand = statusCommand
+        self.pairingCommand = pairingCommand
         path = try Self.socketPath(configurationURL, createDirectory: true)
         lockDescriptor = open(path + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW, mode_t(0o600))
         guard lockDescriptor >= 0 else { throw Self.systemError() }
@@ -100,11 +104,22 @@ public final class HostControl {
         _ = try JSONDecoder().decode(ServerStatus.self, from: data)
         return data
     }
+    public static func requestPairing(_ command: String, configurationURL: URL) throws -> Data {
+        guard ["list", "endpoint"].contains(command) || (command.hasPrefix("trust ") && command.count == 38
+            && command.dropFirst(6).allSatisfy({ $0.isHexDigit && $0.isASCII })) else {
+            throw ReflectionError.invalid("pairing requires list or trust TABLET_ID")
+        }
+        let data = Data(try request("pairing " + command, configurationURL: configurationURL).utf8)
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? String { throw ReflectionError.invalid(error) }
+        return data
+    }
 
     private func receive() {
         let client = accept(listener, nil, nil)
         guard client >= 0 else { return }
-        defer { close(client) }
+        var asynchronous = false
+        defer { if !asynchronous { close(client) } }
         var uid: uid_t = 0, gid: gid_t = 0
         guard getpeereid(client, &uid, &gid) == 0, uid == getuid() else { return }
         Self.configure(client)
@@ -123,18 +138,33 @@ public final class HostControl {
             let prefix: Int
             if command.hasPrefix("mapping ") { handler = mappingCommand; prefix = 8 }
             else if command.hasPrefix("calibration ") { handler = calibrationCommand; prefix = 12 }
+            else if command.hasPrefix("pairing ") { handler = pairingCommand; prefix = 8 }
             else { handler = nil; prefix = 0 }
             guard let handler else {
                 try? Self.writeLine("error\n", client); return
             }
-            do {
-                let data = try handler(String(command.dropFirst(prefix).dropLast()))
-                guard data.count <= 8190 else { throw ReflectionError.invalid("Mapping response is too large") }
-                try Self.writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
-            } catch {
-                if let data = try? JSONSerialization.data(withJSONObject: ["error": String(describing: error)]) {
-                    try? Self.writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
+            let argument = String(command.dropFirst(prefix).dropLast())
+            if command.hasPrefix("pairing trust ") {
+                // USB verification can take seconds; status and stop remain responsive.
+                asynchronous = true
+                pairingQueue.async {
+                    defer { close(client) }
+                    Self.respond(client, argument: argument, handler: handler)
                 }
+            } else {
+                Self.respond(client, argument: argument, handler: handler)
+            }
+        }
+    }
+
+    private static func respond(_ client: Int32, argument: String, handler: (String) throws -> Data) {
+        do {
+            let data = try handler(argument)
+            guard data.count <= 8190 else { throw ReflectionError.invalid("Control response is too large") }
+            try writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
+        } catch {
+            if let data = try? JSONSerialization.data(withJSONObject: ["error": String(describing: error)]) {
+                try? writeLine(String(decoding: data, as: UTF8.self) + "\n", client)
             }
         }
     }
@@ -144,7 +174,7 @@ public final class HostControl {
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw systemError() }
         defer { close(descriptor) }
-        configure(descriptor)
+        configure(descriptor, timeoutMilliseconds: command.hasPrefix("pairing trust ") ? 30_000 : 500)
         guard try withAddress(path, { Darwin.connect(descriptor, $0, $1) }) == 0 else {
             throw ReflectionError.invalid("No controllable host is running for this configuration")
         }
@@ -156,8 +186,8 @@ public final class HostControl {
         return try readLine(descriptor)
     }
 
-    private static func configure(_ descriptor: Int32) {
-        var timeout = timeval(tv_sec: 0, tv_usec: 500_000)
+    private static func configure(_ descriptor: Int32, timeoutMilliseconds: Int = 500) {
+        var timeout = timeval(tv_sec: timeoutMilliseconds / 1000, tv_usec: Int32(timeoutMilliseconds % 1000 * 1000))
         setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
         setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
         var enabled: Int32 = 1

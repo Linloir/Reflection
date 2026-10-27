@@ -8,7 +8,7 @@ namespace reflection {
 
 struct Config {
     std::string transport = "tcp";
-    std::string bind = "127.0.0.1";
+    std::string bind = "0.0.0.0";
     uint16_t port = 24819;
     std::string token;
     Mapping mapping;
@@ -16,6 +16,7 @@ struct Config {
     bool target_virtual_desktop = true;
     std::string target_display;
     bool show_cursor = true;
+    bool native_touchpad = true;
     void validate() const;
 };
 

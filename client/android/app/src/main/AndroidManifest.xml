@@ -6,10 +6,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <application android:label="${reflectionAppLabel}" android:theme="@style/AppTheme"
+    <application android:label="${reflectionAppLabel}" android:theme="@style/AppTheme" android:icon="@drawable/ic_reflection"
         android:allowBackup="false" android:usesCleartextTraffic="true"
         android:supportsRtl="true">
         <activity android:name="io.github.linloir.reflection.ui.MainActivity" android:exported="true"
+            android:screenOrientation="userLandscape"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

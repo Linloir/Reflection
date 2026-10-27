@@ -19,6 +19,7 @@ public struct ServerStatus: Codable {
     public var lastDisconnect: String?
     public var contactDown: Bool?
     public var backendReleaseCount: UInt64?
+    public var touchpadEvents: UInt64 = 0
     public var pendingSendBytes = 0
     public var sendQueueLimit = 65536
     public var updatedAt = ""
@@ -32,12 +33,13 @@ public struct ServerStatus: Codable {
 public final class TabletServer {
     private let configuration: ServerConfiguration
     private let backend: TabletBackend
+    private let touchpad: QuartzTouchpadBackend
     private var mapper: CoordinateMapper
     private var screenMapping: ScreenMappingState
     private let stabilizer: HostPenStabilizer
     private let calibration: HostCalibration
     private let configurationURL: URL?
-    private let tokenKey: SymmetricKey
+    private let authenticationTokens: () -> [String]
     private let queue = DispatchQueue(label: "org.reflection.server", qos: .userInteractive)
     private let statusQueue = DispatchQueue(label: "org.reflection.status", qos: .utility)
     private let statusURL: URL?
@@ -55,6 +57,11 @@ public final class TabletServer {
     private var lastPing: UInt64?
     private var capabilitiesReceived = false
     private var mappingNegotiated = false
+    private var touchpadNegotiated = false
+    private var tabletCalibrationNegotiated = false
+    private var tabletCalibrationSequence: UInt64 = 0
+    private var tabletContact = false
+    private var touchpadGuard = TouchpadSequenceGuard()
     private var mappingRequestSequence: UInt64 = 0
     private var mappingResponseRevision: UInt64 = 0
     private var lastMappingSentRevision: UInt64 = 0
@@ -67,9 +74,11 @@ public final class TabletServer {
     public init(configuration: ServerConfiguration, backend: TabletBackend,
                 mapper: CoordinateMapper, dryRun: Bool = false, statusURL: URL? = nil,
                 verbose: Bool = false, configurationURL: URL? = nil,
+                authenticationTokens: (() -> [String])? = nil,
                 log: @escaping (String) -> Void = { print($0) }) throws {
         try configuration.validate()
         self.configuration = configuration; self.backend = backend; self.mapper = mapper
+        self.touchpad = QuartzTouchpadBackend(dryRun: dryRun)
         self.stabilizer = HostPenStabilizer(configuration: configuration.stabilization)
         self.calibration = HostCalibration(noise: configuration.stabilization.noise)
         self.configurationURL = configurationURL
@@ -85,8 +94,11 @@ public final class TabletServer {
                                            initialCursor: CGEvent(source: nil)?.location)
         }
         self.statusURL = statusURL; self.verbose = verbose; self.log = log
-        self.tokenKey = try WireProtocol.tokenKey(configuration.token)
+        self.authenticationTokens = authenticationTokens ?? { [configuration.token] }
         status.backend = dryRun ? "recording" : "quartz"
+    }
+    public func selectTablet() {
+        queue.async { self.disconnect("selected_another_tablet") }
     }
 
     /// Executed through the same-user control socket. Pen and mapping changes share one queue.
@@ -136,6 +148,7 @@ public final class TabletServer {
                         var current = try ServerConfiguration.load(from: configurationURL)
                         current.stabilization.noise = noise
                         try current.save(to: configurationURL)
+                        stabilizer.clearSessionNoise()
                         stabilizer.configuration.noise = noise
                         calibration.complete(noise: noise)
                     } catch { calibration.fail("Could not save calibration: \(error). Previous noise setting was kept.") }
@@ -224,6 +237,11 @@ public final class TabletServer {
         lastPing = nil
         capabilitiesReceived = false
         mappingNegotiated = false
+        touchpadNegotiated = false
+        tabletCalibrationNegotiated = false
+        tabletCalibrationSequence = 0
+        tabletContact = false
+        touchpadGuard = TouchpadSequenceGuard()
         mappingRequestSequence = 0
         mappingResponseRevision = 0
         lastMappingSentRevision = 0
@@ -275,7 +293,10 @@ public final class TabletServer {
             guard type == 2, body.count == 34 else { throw ReflectionError.invalid("Expected authentication") }
             var message = Data("Reflection/client/v1".utf8)
             message.append(nonce)
-            guard WireProtocol.verify(key: tokenKey, data: message, tag: Data(body.dropFirst(2))) else {
+            let keys = authenticationTokens().compactMap { try? WireProtocol.tokenKey($0) }
+            guard let tokenKey = keys.first(where: {
+                WireProtocol.verify(key: $0, data: message, tag: Data(body.dropFirst(2)))
+            }) else {
                 throw ReflectionError.invalid("Authentication failed")
             }
             var serverMessage = Data("Reflection/server/v1".utf8)
@@ -301,6 +322,9 @@ public final class TabletServer {
         case 0x10:
             let sample = try WireProtocol.decodeSample(payload)
             try sampleGuard.accept(sample)
+            if sample.phase == .down { tabletContact = true }
+            if sample.phase == .up || sample.phase == .cancel || sample.phase == .leave { tabletContact = false }
+            touchpad.release()
             lastSequence = sample.sequence
             status.samples += 1
             status.lastSequence = sample.sequence
@@ -337,8 +361,15 @@ public final class TabletServer {
                 throw ReflectionError.invalid("Invalid capabilities")
             }
             capabilitiesReceived = true
-            struct Capabilities: Decodable { let hostStabilization: Int? }
-            stabilizer.rawClient = (try? JSONDecoder().decode(Capabilities.self, from: payload))?.hostStabilization == 1
+            struct Capabilities: Decodable { let hostStabilization: Int?; let touchpad: Int?; let tabletCalibration: Int? }
+            let capabilities = try? JSONDecoder().decode(Capabilities.self, from: payload)
+            stabilizer.rawClient = capabilities?.hostStabilization == 1
+            touchpadNegotiated = capabilities?.touchpad == 1
+            if touchpadNegotiated { send(type: 0x24, payload: Data([1])) }
+            tabletCalibrationNegotiated = capabilities?.tabletCalibration == 1 && stabilizer.rawClient
+            if tabletCalibrationNegotiated {
+                send(type: 0x26, payload: TabletNoiseCalibration.acknowledgement(sequence: 0, noise: 0))
+            }
             mappingNegotiated = MappingRequest.supportsControl(in: payload)
             if mappingNegotiated { sendMappingStatus(force: true) }
         case 0x21:
@@ -348,6 +379,22 @@ public final class TabletServer {
             try screenMapping.request(request.action, displayID: request.displayID)
             synchronizeMapper()
             sendMappingStatus(force: true)
+            persistStatus()
+        case 0x23:
+            guard touchpadNegotiated else { throw ReflectionError.invalid("Touchpad was not negotiated") }
+            let event = try TouchpadEvent.decode(payload)
+            try touchpadGuard.accept(event)
+            if tabletContact { touchpad.release(); break }
+            touchpad.submit(event)
+        case 0x25:
+            guard tabletCalibrationNegotiated, !tabletContact, !calibration.status.active else {
+                throw ReflectionError.invalid("Tablet calibration was not negotiated or pen calibration is busy")
+            }
+            let request = try TabletNoiseCalibration.decode(payload, after: tabletCalibrationSequence)
+            try stabilizer.setSessionNoise(request.noise)
+            tabletCalibrationSequence = request.sequence
+            send(type: 0x26, payload: TabletNoiseCalibration.acknowledgement(sequence: request.sequence,
+                noise: stabilizer.configuration.noise))
             persistStatus()
         default:
             throw ReflectionError.invalid("Unknown frame type")
@@ -390,6 +437,7 @@ public final class TabletServer {
         guard mapper.target != screenMapping.target else { return }
         // ScreenMappingState guarantees the old contact has ended before this target changes.
         backend.release()
+        touchpad.release()
         stabilizer.reset()
         mapper = CoordinateMapper(configuration: configuration.mapping, target: screenMapping.target,
                                   initialCursor: CGEvent(source: nil)?.location)
@@ -426,7 +474,8 @@ public final class TabletServer {
         old.stateUpdateHandler = nil
         old.cancel()
         backend.release()
-        stabilizer.reset()
+        touchpad.release()
+        stabilizer.clearSessionNoise()
         stabilizer.rawClient = false
         if calibration.status.active { calibration.fail("The tablet disconnected. Previous calibration was kept.") }
         screenMapping.release()
@@ -450,10 +499,12 @@ public final class TabletServer {
         status.mapping = screenMapping.status
         status.stabilization = stabilizer.status
         if calibration.status.active || !status.authenticated { status.stabilization?.active = false }
-        status.stabilization?.legacyClient = status.authenticated && !stabilizer.rawClient
+        let legacyClient = status.authenticated && !stabilizer.rawClient
+        status.stabilization?.legacyClient = legacyClient
         status.calibration = calibration.status
         status.pendingSendBytes = sendBudget.pendingBytes
         status.sendQueueLimit = sendBudget.limit
+        status.touchpadEvents = touchpad.events
         if let recording = backend as? RecordingBackend {
             status.contactDown = recording.contactDown
             status.backendReleaseCount = recording.releaseCount

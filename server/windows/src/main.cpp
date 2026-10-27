@@ -1,4 +1,5 @@
 #include "reflection/windows.hpp"
+#include "reflection/native_touchpad.hpp"
 #include "reflection/runtime.hpp"
 #include <cstdlib>
 #include <iostream>
@@ -37,6 +38,7 @@ void usage() {
         "  reflection-host [--config PATH] profiles list|save|show|load|delete [NAME] [--replace]\n"
         "  reflection-host [--config PATH] serve [--dry-run] [--transport tcp|bluetooth]\n"
         "  reflection-host [--config PATH] status|stop\n"
+        "  reflection-host [--config PATH] pairing list|trust [TABLET_ID]\n"
         "  reflection-host [--config PATH] mapping status|next|previous|all|select [DISPLAY_ID]\n"
         "  reflection-host [--config PATH] calibration status|start|finish|cancel [--json]\n"
         "  reflection-host doctor\n"
@@ -54,6 +56,8 @@ void print_event(const reflection::HostEvent& event) {
     else if (event.kind == "disconnected") output << ",\"reason\":" << json_escape(event.detail);
     else if (event.kind == "connected") output << ",\"authenticated\":true";
     else if (event.kind == "session_end") output << ",\"samples\":" << event.samples;
+    else if (event.kind == "native_touchpad_unavailable") output << ",\"reason\":" << json_escape(event.detail);
+    else if (event.kind == "native_touchpad_enabled") output << ",\"detail\":" << json_escape(event.detail);
     if (event.pen) {
         const auto& pen = *event.pen;
         output << ",\"sequence\":" << pen.source.sequence
@@ -99,6 +103,7 @@ int main() {
             const bool available = pen_api_available();
             std::cout << "{\"backend\":\"windows-synthetic-pen\",\"available\":"
                       << (available ? "true" : "false")
+                      << ",\"nativeTouchpadApiAvailable\":" << (native_touchpad_api_available() ? "true" : "false")
                       << ",\"pressure_max\":1024,\"wintab\":false,\"transports\":[\"tcp\",\"bluetooth-rfcomm\"],"
                          "\"note\":\"API availability does not verify injection into an application\"}\n";
             return available ? 0 : 1;
@@ -119,6 +124,14 @@ int main() {
             return 0;
         }
         if (path.empty()) path = default_config();
+        if (command == "pairing") {
+            if (args.size() == 2 && args[1] == "list")
+                std::cout << HostRuntime::pairing_request(path) << '\n';
+            else if (args.size() == 3 && args[1] == "trust")
+                std::cout << HostRuntime::pairing_request(path, args[2]) << '\n';
+            else throw std::invalid_argument("pairing requires list or trust TABLET_ID");
+            return 0;
+        }
         if (command == "calibration") {
             if(args.size()<2 || args.size()>3 || (args.size()==3 && args[2]!="--json"))
                 throw std::invalid_argument("calibration requires status|start|finish|cancel [--json]");
@@ -261,11 +274,15 @@ int main() {
                 } else throw std::invalid_argument("unknown serve option: " + args[i]);
             }
             config.validate();
-            HostRuntime runtime(path, config, dry_run, running);
+            wchar_t isolated_value[2]{};
+            const bool isolated = dry_run &&
+                GetEnvironmentVariableW(L"REFLECTION_TEST_ISOLATED", isolated_value, 2) == 1 && isolated_value[0] == L'1';
+            if (isolated) { config.bind = "127.0.0.1"; config.transport = "tcp"; }
+            HostRuntime runtime(path, config, dry_run, running, !isolated);
             serve(config, dry_run, running, [&](const HostEvent& event) {
                 runtime.event(event.kind, event.port, event.samples);
                 if (event.kind != "samples") print_event(event);
-            }, runtime.display_mapping(), runtime.input());
+            }, runtime.display_mapping(), runtime.input(), runtime.connectivity());
             return 0;
         }
         throw std::invalid_argument("unknown command: " + command);

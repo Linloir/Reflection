@@ -17,6 +17,7 @@ Usage: reflection [--config PATH] COMMAND [OPTIONS]
   profiles save NAME [--replace]   Save mapping, pressure, tilt and resolution settings
   profiles show|load|delete NAME   Inspect, activate or delete a profile
   pair                            Show the pairing token (sensitive; do not share logs)
+  pairing list|trust TABLET_ID     Discover tablets and approve a matching on-screen identity code
   displays                        List display IDs and desktop coordinates as JSON
   mapping status|next|previous|all Live display mapping without reconnecting the tablet
   mapping select ID               Lock mapping to a display UUID (or current display number)
@@ -25,8 +26,8 @@ Usage: reflection [--config PATH] COMMAND [OPTIONS]
   doctor                          Report permissions, backend capabilities and config health
   status                          Show status and verify the live host control channel
   stop                            Gracefully stop the host using this configuration
-  start [--dry-run] [--verbose] [--bluetooth] [--tablet-point-events]
-                                  Run server; optionally publish native Bluetooth RFCOMM
+  start [--dry-run] [--verbose] [--bluetooth|--no-bluetooth] [--tablet-point-events]
+                                  Run server; Bluetooth is offered when available
   help                            Show this help
 
 Examples:
@@ -149,6 +150,10 @@ func main() throws {
     case "pair":
         let config = try ServerConfiguration.load(from: configURL)
         try printJSON(["protocol": 1, "port": config.port, "token": config.token])
+    case "pairing":
+        guard args.count == 2 || args.count == 3 else { throw ReflectionError.invalid("pairing requires list or trust TABLET_ID") }
+        let data = try HostControl.requestPairing(args.dropFirst().joined(separator: " "), configurationURL: configURL)
+        try printJSON(JSONSerialization.jsonObject(with: data))
     case "displays":
         try printJSON(encodedObject(availableDisplays()))
     case "mapping":
@@ -206,7 +211,7 @@ func main() throws {
         try HostControl.requestStop(configurationURL: configURL)
         try printJSON(["stopRequested": true])
     case "start":
-        let allowed = Set(["start", "--dry-run", "--verbose", "--bluetooth", "--tablet-point-events"])
+        let allowed = Set(["start", "--dry-run", "--verbose", "--bluetooth", "--no-bluetooth", "--tablet-point-events"])
         guard args.allSatisfy(allowed.contains) else { throw ReflectionError.invalid("Unknown start option") }
         var shutdown: (() -> Void)?
         let config = try ServerConfiguration.load(from: configURL)
@@ -221,24 +226,56 @@ func main() throws {
             : try QuartzTabletBackend(emitTabletPointEvents: args.contains("--tablet-point-events"))
         let mapper = CoordinateMapper(configuration: config.mapping, target: mapping.target,
             initialCursor: CGEvent(source: nil)?.location)
+        let discovery = HostDiscoveryService(configuration: config, configurationURL: configURL)
         let server = try TabletServer(configuration: config, backend: backend, mapper: mapper,
-            dryRun: dryRun, statusURL: statusURL, verbose: args.contains("--verbose"), configurationURL: configURL)
+            dryRun: dryRun, statusURL: statusURL, verbose: args.contains("--verbose"), configurationURL: configURL,
+            authenticationTokens: { discovery.authenticationTokens })
+        discovery.onSelection = { [weak server] in server?.selectTablet() }
         let control = try HostControl(configurationURL: configURL,
             mappingCommand: { try server.mappingCommand($0) },
             calibrationCommand: { try server.calibrationCommand($0) },
-            statusCommand: { try server.liveStatus() }) { shutdown?() }
+            statusCommand: { try server.liveStatus() },
+            pairingCommand: { try discovery.command($0) }) { shutdown?() }
         try server.start { error in
             fputs("reflection: \(error)\n", stderr)
             exit(1)
         }
-        let bluetooth = args.contains("--bluetooth")
+        do { try discovery.start() }
+        catch { fputs("reflection: LAN discovery unavailable: \(error)\n", stderr) }
+        let usb = USBProvisioningService(configuration: config,
+            authorize: { try discovery.authorizeUSB($0) },
+            discovered: { discovery.updateUSBTablets($0) })
+        discovery.onUSBSelection = { [weak usb] id, token in
+            guard let usb else { throw ReflectionError.invalid("USB selection is unavailable") }
+            try usb.selectTablet(id, token: token)
+        }
+        if !dryRun { usb.start() }
+        let bluetooth = (args.contains("--bluetooth") || (!dryRun && !args.contains("--no-bluetooth")))
             ? BluetoothBridge(host: config.bind, port: config.port) : nil
-        try bluetooth?.start()
+        do { try bluetooth?.start() }
+        catch { fputs("reflection: Bluetooth unavailable; retrying while USB and LAN remain active: \(error)\n", stderr) }
         var stopping = false
+        var bluetoothPairingBridge: BluetoothBridge?
+        let bluetoothPairing = BluetoothPairingServer(discovery: discovery)
+        try bluetoothPairing.start { port in
+            guard bluetooth != nil else { return }
+            DispatchQueue.main.async {
+                guard !stopping else { return }
+                let bridge = BluetoothBridge(host: "127.0.0.1", port: port,
+                    serviceIdentifier: BluetoothPairingServer.serviceUUID, maximumSessions: 4, requireBonded: true)
+                bluetoothPairingBridge = bridge
+                do { try bridge.start() }
+                catch { fputs("reflection: Bluetooth pairing unavailable; retrying: \(error)\n", stderr) }
+            }
+        }
         shutdown = {
             guard !stopping else { return }
             stopping = true
+            discovery.stop()
+            usb.stop()
             bluetooth?.stop()
+            bluetoothPairingBridge?.stop()
+            bluetoothPairing.stop()
             server.stop { exit(0) }
         }
         for signum in [SIGINT, SIGTERM] {
@@ -248,7 +285,7 @@ func main() throws {
             source.resume()
             signalSources.append(source)
         }
-        withExtendedLifetime(control) { RunLoop.main.run() }
+        withExtendedLifetime((control, discovery, usb, bluetoothPairing)) { RunLoop.main.run() }
     default: throw ReflectionError.invalid("Unknown command: \(command). Run reflection help.")
     }
 }

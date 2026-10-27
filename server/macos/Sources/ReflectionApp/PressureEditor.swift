@@ -1,11 +1,13 @@
 import ReflectionCore
 import SwiftUI
 
+private typealias EditorState<Value> = SwiftUI.State<Value>
+
 struct PressureEditor: View {
     @Binding var mapping: MappingConfiguration
     let livePressure: Double
     let hasLiveSample: Bool
-    @SwiftUI.State private var selectedPoint: Int?
+    @EditorState private var selectedPoint: Int?
 
     private var points: [PressurePoint] {
         if !mapping.pressureCurve.isEmpty { return mapping.pressureCurve }

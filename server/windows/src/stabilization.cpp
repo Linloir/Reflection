@@ -39,11 +39,33 @@ void StabilizationConfig::validate() const {
 }
 HostInput::HostInput(StabilizationConfig config):config_(config),previous_noise_(config.noise) { config_.validate(); reset_noise_locked(true); }
 void HostInput::reset_locked() { contact_=false; anchored_=false; filter_ready_=false; hover_candidate_=false; reset_noise_locked(false); }
-void HostInput::begin_session(bool raw) { std::lock_guard<std::mutex> lock(mutex_); reset_locked(); reset_noise_locked(true); connected_=true; raw_=raw; suppressed_=false; fresh_down_=collecting_; }
+void HostInput::begin_session(bool raw) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(session_noise_default_) config_.noise=*session_noise_default_;
+    session_noise_default_.reset();
+    reset_locked(); reset_noise_locked(true); connected_=true; raw_=raw; suppressed_=false; fresh_down_=collecting_;
+}
 void HostInput::negotiate(bool raw) { std::lock_guard<std::mutex> lock(mutex_); raw_=raw; filter_ready_=false; reset_noise_locked(true); }
 void HostInput::end_session() {
-    std::lock_guard<std::mutex> lock(mutex_); reset_locked(); reset_noise_locked(true); connected_=false; raw_=false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(session_noise_default_) config_.noise=*session_noise_default_;
+    session_noise_default_.reset();
+    reset_locked(); reset_noise_locked(true); connected_=false; raw_=false;
     if(collecting_) { collecting_=false; phase_="failed"; result_="failed"; reason_="Tablet disconnected during calibration; reconnect and start again."; }
+}
+double HostInput::set_session_noise(double noise) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!connected_ || !raw_ || contact_ || collecting_ || !std::isfinite(noise) ||
+       (noise!=0 && (noise<.00001 || noise>.02))) throw std::invalid_argument("invalid tablet noise or active pen contact");
+    if(noise==0) {
+        if(session_noise_default_) config_.noise=*session_noise_default_;
+        session_noise_default_.reset();
+    } else {
+        if(!session_noise_default_) session_noise_default_=config_.noise;
+        config_.noise=noise;
+    }
+    reset_locked(); reset_noise_locked(true);
+    return config_.noise;
 }
 void HostInput::reset_noise_locked(bool reset_estimate) {
     noise_history_.clear(); noise_window_.clear(); noise_count_=0; noise_update_time_=0;
@@ -292,6 +314,7 @@ std::string HostInput::calibration(unsigned action,const std::function<void(doub
                 if(noise>.02) throw std::runtime_error("Calibration noise is too high; try again.");
                 const double measured=std::clamp(noise,.00001,.02);
                 if(persist) persist(measured);
+                session_noise_default_.reset();
                 config_.noise=measured; filter_ready_=false; reset_noise_locked(true); phase_="complete"; result_="success"; reason_.clear();
             } catch(const std::exception& error) { phase_="failed"; result_="failed"; reason_=error.what(); }
             collecting_=false; suppressed_=true; reset_locked();

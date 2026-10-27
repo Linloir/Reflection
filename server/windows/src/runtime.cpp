@@ -4,6 +4,7 @@
 #include <thread>
 #include <sstream>
 #include <cstring>
+#include <future>
 
 namespace reflection {
 namespace {
@@ -50,6 +51,16 @@ struct MappingView {
     MappingState* value = nullptr;
     ~MappingView() { if (value) UnmapViewOfFile(value); }
 };
+struct PairingState {
+    DWORD version;
+    uint64_t requested, completed;
+    char id[33];
+    char response[16384];
+};
+struct PairingView {
+    PairingState* value = nullptr;
+    ~PairingView() { if (value) UnmapViewOfFile(value); }
+};
 struct MutexScope {
     HANDLE handle;
     explicit MutexScope(HANDLE value) : handle(value) {
@@ -87,13 +98,16 @@ struct HostRuntime::Impl {
     MappingView mapping_state;
     Handle calibration_data, calibration_mutex, calibration_call_mutex;
     MappingView calibration_state;
+    Handle pairing_data, pairing_mutex, pairing_call_mutex;
+    PairingView pairing_state;
+    std::shared_ptr<AutomaticConnectivity> automatic;
     std::shared_ptr<DisplayMapping> display_mapping;
     std::shared_ptr<HostInput> input;
     Config startup_config;
     std::filesystem::path config_path;
     std::atomic_bool& running;
     std::thread watcher;
-    Impl(const std::filesystem::path& path, const Config& config, bool dry_run, std::atomic_bool& flag)
+    Impl(const std::filesystem::path& path, const Config& config, bool dry_run, std::atomic_bool& flag, bool discovery)
         : startup_config(config), config_path(path), running(flag) {
         mutex.value = CreateMutexW(nullptr, FALSE, object_name(path, L"-owner").c_str());
         if (!mutex.value) throw std::runtime_error("cannot create host ownership mutex");
@@ -138,8 +152,20 @@ struct HostRuntime::Impl {
           copy_response(*calibration_state.value,input->calibration_status());
           const auto snapshot="{\"calibration\":"+input->calibration_status()+",\"stabilization\":"+input->status()+"}";
           std::memcpy(calibration_state.value->snapshot,snapshot.c_str(),snapshot.size()+1); }
+        if (discovery) automatic = std::make_shared<AutomaticConnectivity>(config, path, !dry_run);
+        pairing_mutex.value = CreateMutexW(nullptr, FALSE, object_name(path, L"-pairing-lock").c_str());
+        pairing_call_mutex.value = CreateMutexW(nullptr, FALSE, object_name(path, L"-pairing-call").c_str());
+        pairing_data.value = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+            sizeof(PairingState), object_name(path, L"-pairing-state").c_str());
+        if (!pairing_mutex.value || !pairing_call_mutex.value || !pairing_data.value)
+            throw std::runtime_error("cannot create pairing controls");
+        pairing_state.value = static_cast<PairingState*>(MapViewOfFile(pairing_data.value, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(PairingState)));
+        if (!pairing_state.value) throw std::runtime_error("cannot map pairing controls");
+        { MutexScope lock(pairing_mutex.value); *pairing_state.value = PairingState{}; pairing_state.value->version = 1; }
         watcher = std::thread([this] {
             auto last_refresh = GetTickCount64();
+            std::future<std::string> pairing_operation;
+            uint64_t pairing_request_id = 0;
             while (running.load()) {
                 if (WaitForSingleObject(stop_event.value, 100) == WAIT_OBJECT_0) {
                     running.store(false);
@@ -183,26 +209,105 @@ struct HostRuntime::Impl {
                     const auto snapshot="{\"calibration\":"+input->calibration_status()+",\"stabilization\":"+input->status()+"}";
                     if(snapshot.size()<sizeof(request.snapshot)) std::memcpy(request.snapshot,snapshot.c_str(),snapshot.size()+1);
                 } catch(const std::exception&) {}
+                try {
+                    MutexScope lock(pairing_mutex.value);
+                    auto& request = *pairing_state.value;
+                    if (pairing_operation.valid()) {
+                        if (pairing_operation.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                            auto response = pairing_operation.get();
+                            if (response.size() >= sizeof(request.response))
+                                response = "{\"error\":\"device list exceeds limit\"}";
+                            if (request.requested == pairing_request_id) {
+                                std::memcpy(request.response, response.c_str(), response.size() + 1);
+                                request.completed = pairing_request_id;
+                            }
+                        }
+                    } else if (request.requested != request.completed) {
+                        std::string response;
+                        try {
+                            if (request.id[32] != '\0') throw std::invalid_argument("invalid tablet identity");
+                            const std::string id(request.id);
+                            const auto service = automatic;
+                            pairing_request_id = request.requested;
+                            // USB authorization may wait for ADB; keep mapping and calibration responsive.
+                            pairing_operation = std::async(std::launch::async, [service, id] {
+                                try {
+                                    if (!service) {
+                                        if (!id.empty()) throw std::runtime_error("Automatic discovery is not running");
+                                        return std::string("[]");
+                                    }
+                                    return id.empty() ? service->devices() : service->trust(id);
+                                } catch (const std::exception& error) {
+                                    return "{\"error\":" + json_escape(error.what()) + "}";
+                                }
+                            });
+                        } catch (const std::exception& error) {
+                            response = "{\"error\":" + json_escape(error.what()) + "}";
+                            std::memcpy(request.response, response.c_str(), response.size() + 1);
+                            request.completed = request.requested;
+                        }
+                    }
+                } catch (const std::exception&) {}
             }
         });
     }
     ~Impl() {
         running.store(false);
         SetEvent(stop_event.value);
+        if (automatic) automatic->cancel();
         if (watcher.joinable()) watcher.join();
         if (mapping_state.value) mapping_state.value->version = 0;
         if (calibration_state.value) calibration_state.value->version = 0;
+        if (pairing_state.value) pairing_state.value->version = 0;
         state.value->version = 0;
         ReleaseMutex(mutex.value);
     }
 };
 
 HostRuntime::HostRuntime(const std::filesystem::path& path, const Config& config,
-                         bool dry_run, std::atomic_bool& running)
-    : impl_(std::make_unique<Impl>(path, config, dry_run, running)) {}
+                         bool dry_run, std::atomic_bool& running, bool automatic_discovery)
+    : impl_(std::make_unique<Impl>(path, config, dry_run, running, automatic_discovery)) {}
 HostRuntime::~HostRuntime() = default;
 std::shared_ptr<DisplayMapping> HostRuntime::display_mapping() const { return impl_->display_mapping; }
 std::shared_ptr<HostInput> HostRuntime::input() const { return impl_->input; }
+std::shared_ptr<AutomaticConnectivity> HostRuntime::connectivity() const { return impl_->automatic; }
+
+std::string HostRuntime::pairing_request(const std::filesystem::path& path, const std::string& id) {
+    if (!id.empty() && (id.size() != 32 || id.find_first_not_of("0123456789abcdef") != std::string::npos))
+        throw std::invalid_argument("pairing trust requires a 32-character tablet identity");
+    Handle data, mutex, serial;
+    data.value = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, object_name(path, L"-pairing-state").c_str());
+    if (!data.value) {
+        if (id.empty()) return "[]";
+        throw std::runtime_error("Start the host before trusting a tablet");
+    }
+    mutex.value = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, object_name(path, L"-pairing-lock").c_str());
+    serial.value = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, object_name(path, L"-pairing-call").c_str());
+    if (!mutex.value || !serial.value) throw std::runtime_error("cannot access pairing controls");
+    PairingView view;
+    view.value = static_cast<PairingState*>(MapViewOfFile(data.value, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(PairingState)));
+    if (!view.value) throw std::runtime_error("cannot map pairing controls");
+    MutexScope serialize(serial.value);
+    uint64_t request_id;
+    {
+        MutexScope lock(mutex.value);
+        if (view.value->version != 1) throw std::runtime_error("pairing unavailable");
+        request_id = ++view.value->requested;
+        std::memset(view.value->id, 0, sizeof(view.value->id));
+        std::memcpy(view.value->id, id.data(), id.size());
+    }
+    for (unsigned i = 0; i < (id.empty() ? 100u : 1500u); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        MutexScope lock(mutex.value);
+        if (view.value->version != 1) throw std::runtime_error("host stopped while pairing");
+        if (view.value->completed == request_id) {
+            const std::string result(view.value->response, strnlen_s(view.value->response, sizeof(view.value->response)));
+            if (result.rfind("{\"error\":", 0) == 0) throw std::runtime_error(result);
+            return result;
+        }
+    }
+    throw std::runtime_error("pairing command timed out");
+}
 
 std::string HostRuntime::calibration_request(const std::filesystem::path& path,unsigned action) {
     if(action>3) throw std::invalid_argument("invalid calibration command");

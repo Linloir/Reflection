@@ -33,6 +33,45 @@ func sessionSample(_ sequence: UInt64, _ phase: PenPhase, tool: PenTool = .pen,
 }
 
 do {
+    let discoveryToken = String(repeating: "24", count: 32)
+    let discoveryNonce = String(repeating: "ab", count: 16)
+    let discoveryResponse = HostDiscoveryService.reply(request: "REFLECTION-DISCOVER/1 " + discoveryNonce,
+                                                       port: 24819, token: discoveryToken)!
+    let discoveryFields = String(decoding: discoveryResponse, as: UTF8.self).components(separatedBy: "\n")
+    check(discoveryFields.count == 5 && discoveryFields[1] == discoveryNonce && discoveryFields[2] == "24819",
+          "discovery nonce and endpoint")
+    let discoveryMAC = WireProtocol.mac(key: try WireProtocol.tokenKey(discoveryToken),
+        data: Data(discoveryFields.prefix(4).joined(separator: "\n").utf8))
+    check(discoveryMAC == hex(discoveryFields[4]), "discovery authentication")
+    check(!String(decoding: discoveryResponse, as: UTF8.self).contains(discoveryToken), "discovery keeps credentials private")
+    check(HostDiscoveryService.reply(request: "REFLECTION-DISCOVER/1 bad", port: 24819, token: discoveryToken) == nil,
+          "discovery malformed nonce")
+    check(HostDiscoveryService.deviceToken(rootToken: discoveryToken, deviceID: String(repeating: "a", count: 32))
+        != HostDiscoveryService.deviceToken(rootToken: discoveryToken, deviceID: String(repeating: "b", count: 32)),
+          "pairing credentials differ between tablets")
+    let tabletCalibrationBytes = hex("00000000000000013b449ba6")
+    let tabletCalibration = try TabletNoiseCalibration.decode(tabletCalibrationBytes, after: 0)
+    check(tabletCalibration.sequence == 1 && abs(tabletCalibration.noise - 0.003) < 1e-8,
+          "tablet calibration wire vector")
+    rejects("tablet calibration replay") { _ = try TabletNoiseCalibration.decode(tabletCalibrationBytes, after: 1) }
+    rejects("tablet calibration nonfinite") { _ = try TabletNoiseCalibration.decode(hex("00000000000000017fc00000"), after: 0) }
+    rejects("tablet calibration size") { _ = try TabletNoiseCalibration.decode(tabletCalibrationBytes.dropLast(), after: 0) }
+    check(TabletNoiseCalibration.acknowledgement(sequence: 1, noise: 0.003) == Data([1]) + tabletCalibrationBytes,
+          "tablet calibration acknowledgement vector")
+    var noiseConfiguration = StabilizationConfiguration()
+    noiseConfiguration.noise = 0.0007
+    let tabletNoise = HostPenStabilizer(configuration: noiseConfiguration)
+    try tabletNoise.setSessionNoise(0.003)
+    check(tabletNoise.configuration.noise == 0.003 && tabletNoise.status.estimatedNoiseX == 0.003,
+          "tablet calibration applies session prior")
+    try tabletNoise.setSessionNoise(0.004)
+    tabletNoise.clearSessionNoise()
+    check(tabletNoise.configuration.noise == 0.0007, "tablet session restores host prior")
+    try tabletNoise.setSessionNoise(0.002)
+    try tabletNoise.setSessionNoise(0)
+    check(tabletNoise.configuration.noise == 0.0007, "tablet zero resets override")
+    _ = tabletNoise.apply(sample(x: 0.5, y: 0.5, phase: .down))
+    rejects("tablet prior cannot change mid-contact") { try tabletNoise.setSessionNoise(0.005) }
     let fixtureURL = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0) }
         ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("../../../protocol/vectors.json").standardized
@@ -334,6 +373,8 @@ do {
     try profiles.delete(name: "Soft pencil")
     let remainingProfiles = try profiles.list()
     check(remainingProfiles.isEmpty, "profile deletion")
+    passed += try touchpadChecks()
+    passed += try usbSelectionChecks()
     print("{\"checks\":\(passed),\"result\":\"passed\"}")
 } catch {
     fputs("FAIL: \(error)\n", stderr)

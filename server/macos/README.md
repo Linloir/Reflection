@@ -20,6 +20,8 @@ open server/macos/build/Reflection.app
 脚本在 `server/macos/build/Reflection.app` 生成完整应用，默认执行本地 ad-hoc 签名。
 可传入其他以 `.app` 结尾的输出路径。用于公开分发时应使用 Developer ID 签名及公证。
 可以先把应用移动到「应用程序」文件夹，再授予辅助功能权限，避免移动后重新授权。
+构建机需安装 Android Platform-Tools；可通过 `REFLECTION_PLATFORM_TOOLS` 指定目录。
+脚本把 ADB 和第三方声明放入应用资源，最终用户无需安装 SDK 或配置 `PATH`。
 
 macOS 26 及更新系统使用 Liquid Glass 控件表面；macOS 12–25 使用系统材质作为回退，
 并使用相应系统版本提供的原生导航和控件。构建使用新 SDK，部署下限仍为 macOS 12。
@@ -36,7 +38,8 @@ macOS 26 及更新系统使用 Liquid Glass 控件表面；macOS 12–25 使用�
 - **Mapping** 支持绝对/相对模式、显示器/桌面区域、平板有效区域、旋转、等比映射及
   软件坐标网格；网格不会改变硬件采样率或 LPI。
 - **Connection** 可设置地址、端口和密钥，以及下次从界面启动主机时使用的蓝牙、
-  dry-run 和实验 tablet-point 选项。密钥默认隐藏。
+  dry-run 和实验 tablet-point 选项。附近设备列表提供 **Trust & connect**，
+  核对两端确认码即可建立信任，也可切换到另一台平板。密钥默认隐藏。
 
 应用启动后不会自动注入输入。关闭应用会停止由它启动的主机；从 CLI 启动的独立主机
 不会因关闭窗口而停止。界面每秒刷新一次状态，笔输入处理仍在独立的主机进程内完成。
@@ -76,35 +79,36 @@ Reflection 程序。授权后重新启动程序：
 reflection start
 ```
 
-程序不自行开启系统权限。`doctor` 只读取辅助功能授权状态；运行 `start --bluetooth`
-才会初始化蓝牙服务，系统可能要求蓝牙权限。
+程序不自行开启系统权限。`doctor` 只读取辅助功能授权状态；普通 `start` 同时尝试
+初始化蓝牙服务，系统可能要求蓝牙权限。使用 `--no-bluetooth` 可关闭蓝牙。
+dry-run 默认不启动蓝牙，显式传 `--bluetooth` 才会启动。
 
 ## 连接
 
 ### USB
 
-当前 USB 使用 Android 调试桥的有线 TCP 转发，需要 Android 开启 USB 调试并信任主机。
-主机默认监听 `127.0.0.1:24819`，不对局域网开放：
+USB 使用 Android 调试桥的有线 TCP 转发，需要 Android 开启 USB 调试并在系统弹窗
+中信任主机。正常启动宿主后，随包 ADB 自动发现已授权的物理 USB 平板、维护反向转发
+并派发设备专用凭据，无需填写地址或密钥：
 
 ```sh
-adb reverse tcp:24819 tcp:24819
-reflection pair
 reflection start
 ```
 
-客户端填写 `127.0.0.1`、端口 `24819` 和 `pair` 显示的配对密钥。配对密钥是敏感数据，
-不要放入截图、公开日志或版本库。配置文件按当前用户可读写的权限保存。
+裸 CLI 开发构建从 `REFLECTION_ADB`、`PATH` 或默认 Android SDK 路径查找 ADB。
+dry-run 不自动下发 USB 配对信息。旧的 `adb reverse` 和 `pair` 手工诊断流程仍可用；
+`pair` 显示的密钥不要放入截图、公开日志或版本库。
 
 ### WiFi
 
-```sh
-reflection config set bind '"0.0.0.0"'
-reflection start
-```
+新配置监听所有 IPv4 接口，客户端自动发现，不需要填写 Mac 的局域网地址。
+在 Connection 页选择平板并点击 **Trust & connect**，再在平板核对电脑显示的
+六位确认码并允许连接。信任记录支持多台平板和多台电脑，以后自动重连。
 
-在客户端填写 Mac 的局域网地址。也可以把 `bind` 设为指定网卡地址。防火墙需要允许所选
-端口的入站连接。协议提供双向 HMAC 身份认证及每帧完整性验证，**不加密笔迹内容**；
-请使用可信网络，或在 VPN 内使用。它不用于直接暴露到公网。
+旧配置中的 `127.0.0.1` 不会被覆盖，可通过 **Enable local network & restart**
+启用局域网，也可以把 `bind` 设为指定网卡地址。防火墙需要允许 UDP `24820`
+及配置的 TCP 输入端口，默认 `24819`。协议提供双向 HMAC 身份认证及每帧完整性验证，
+**不加密笔迹内容**；请使用可信网络或 VPN，不要直接暴露到公网。
 
 ### 原生蓝牙 RFCOMM
 
@@ -114,8 +118,10 @@ reflection start
 reflection start --bluetooth
 ```
 
-客户端选择蓝牙传输及已配对的 Mac。服务 UUID 固定为
-`7b011e5a-8b31-4c40-8d7a-3e6c6dcbb758`。程序通过 IOBluetooth 发布非持久 SDP 服务，
+客户端自动尝试已配对的 Mac。输入服务 UUID 固定为
+`7b011e5a-8b31-4c40-8d7a-3e6c6dcbb758`；首次信任使用独立的
+`7b011e5a-8b31-4c40-8d7a-3e6c6dcbb759`，在不连接 LAN/USB 时也能通过宿主设备列表
+及双端确认码完成配对。程序通过 IOBluetooth 发布非持久 SDP 服务，
 接收 RFCOMM 字节流，并经本地 TCP 适配器交给同一认证及输入引擎。无线侧不要求网络、
 热点或蓝牙 PAN；额外的一跳仅发生在主机本地。退出时移除 SDP 服务。
 
@@ -126,6 +132,9 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 输入缓冲在复制和排队前预留预算，上限为 64 KiB；本地 TCP 连接进入等待状态时关闭该
 蓝牙会话。每次 RFCOMM 写入设置独立的 2 秒进度期限，阻塞时关闭通道，避免长时间占用
 唯一的会话位置。
+
+客户端优先保持用户选择的电脑，并在该电脑内按 USB、LAN、蓝牙顺序选择可用链路。
+完整的发现、首次信任和故障处理说明见 [自动连接](../../docs/connectivity.md)。
 
 ## 配置与 CLI
 
@@ -146,6 +155,8 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 | `profiles load NAME` | 将 profile 写入当前配置，重启后生效 |
 | `profiles delete NAME` | 删除指定 profile，保持当前配置 |
 | `pair` | 显示配对所需协议版本、端口和密钥 |
+| `pairing list` | 列出 LAN/蓝牙发现的附近平板及设备码 |
+| `pairing trust TABLET_ID` | 批准或选择平板，并返回供平板核对的确认码 |
 | `displays` | 列出显示器 ID、桌面区域及物理像素尺寸 |
 | `mapping status` | 查询当前映射、屏幕布局和等待抬笔的切换 |
 | `mapping next` / `mapping previous` | 按系统布局从左到右、从上到下切换单块屏幕 |
@@ -156,7 +167,8 @@ Mac/平板组合上完成配对、权限、吞吐和断线恢复验证。`doctor
 | `doctor` | 输出授权、配置、后端和显示器诊断 |
 | `start` | 前台运行，使用 Ctrl-C 或 SIGTERM 安全退出 |
 | `start --dry-run` | 认证、解码和映射，使用记录后端 |
-| `start --bluetooth` | 同时提供原生 RFCOMM 服务 |
+| `start --bluetooth` | 显式启用原生 RFCOMM，含 dry-run |
+| `start --no-bluetooth` | 仅提供 USB/LAN |
 | `start --tablet-point-events` | 额外发送独立 tabletPoint 事件；用于应用精度兼容实验 |
 | `status` | 输出最近状态快照及进程存活检查 |
 | `stop` | 通过当前配置的本机控制通道请求安全停止 |
@@ -352,7 +364,9 @@ AppKit/Quartz tablet 事件的应用有机会得到压力和工具信息，但�
 保真度。事件构造检查不能证明每个采样点都被目标应用绘制；快速转折和起笔必须
 在实际应用中验收。
 
-侧键动作当前固定；没有快捷键编辑器、触控手势、滚轮、虚拟 HID 驱动或独立手写识别。
+侧键动作当前固定；没有快捷键编辑器、虚拟 HID 驱动或独立手写识别。
+触摸板模式提供点击、双指右键、滚动、缩放和桌面切换等事件映射，但不是原生虚拟
+触摸板设备；各应用与系统手势配置的兼容性需要实机检查。
 Android 端不支持的轴不会由服务端补造。配置变化必须重新启动服务，不会在笔接触时热更新。
 
 ## 核心组织
@@ -365,6 +379,8 @@ Android 端不支持的轴不会由服务端补造。配置变化必须重新启
 | `TabletServer.swift` | TCP 生命周期、认证、超时、单会话和状态 |
 | `QuartzBackend.swift` | 可单独检查的事件构造与系统注入 |
 | `BluetoothBridge.swift` | IOBluetooth SDP/RFCOMM 有序传输适配 |
+| `BluetoothPairingServer.swift` | 独立、有界的蓝牙首次配对中继 |
+| `AutomaticConnectivity.swift` | LAN 发现、设备信任、USB 自动配置 |
 | `ReflectionCLI` | 参数解析和核心能力的命令行入口 |
 
 输入核心和系统后端位于串行队列，避免按下/抬起重排；状态文件写入使用独立低优先级队列。
@@ -385,11 +401,14 @@ TCP 启用 `TCP_NODELAY`。异步发送中尚未完成的数据限制为 64 KiB�
 ```sh
 swift run --package-path server/macos reflection-core-checks
 swift test --package-path server/macos
+bash client/android/scripts/test-pairing.sh
 ```
 
 第一条无需 XCTest，验证共享协议向量、身份认证、碎片/合并帧、非法输入、坐标和压力映射、
 记录后端释放，以及 Quartz 事件被转换为 NSEvent 后的压力、倾斜和橡皮擦信息。它不会
 向系统投递任何事件。第二条需要工具链包含 XCTest，完整 Xcode 可提供该运行环境。
+第三条使用临时配置启动真实 dry-run 宿主，检查 Java RSA 互通、LAN 和蓝牙配对中继、
+设备切换、待批准请求隔离，以及重启后的多设备信任，不经过实体蓝牙无线电。
 
 上述自动检查不代替实际应用绘画测试、蓝牙实机测试、触笔至光标延迟测量或长时间稳定性测试。
 

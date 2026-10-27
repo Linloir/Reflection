@@ -1,105 +1,154 @@
-# 连接方式
+# 自动发现与连接
 
-三个连接方式传输同一个带认证的有序笔协议。连接方式不会改变映射或压力配置。
-宿主默认只监听回环地址，且只允许一个活跃客户端。
+Reflection 在客户端前台自动发现宿主机，并保留多台电脑的信任记录。连接过电脑 A
+以后，可以在电脑 B 上选择这台平板并建立信任，无需清除 A 或重新输入密钥。
+宿主也可以在设备列表中选择另一台平板；切换会释放旧会话的笔和触摸状态。
+同一宿主同时只允许一台平板控制输入。
+
+## 首次通过局域网连接
+
+1. 打开电脑上的 Reflection 并启动宿主，在平板上打开 Reflection。
+2. 在电脑的 Connection / Nearby tablets 区域找到平板。核对平板上显示的
+   六位设备码，然后点击 **Trust & connect**。
+3. 电脑显示新的六位确认码。平板弹出电脑连接请求，两端确认码一致时允许连接。
+
+这里不需要选择 IP、输入端口或复制密钥。第一次确认建立信任，以后自动重连。
+设备名和 IP 只用于辨认，不能代替两端确认码。已信任设备的 Connect 操作将当前
+会话切换到该设备。
+
+客户端广播 RSA 公钥和临时 nonce；宿主在用户批准后发送 RSA-OAEP-SHA256
+加密的设备专用凭据。凭据由宿主安装密钥与平板身份派生，不同平板的凭据不同。
+确认码在两端分别计算，不在发现报文中明文发送。平板收到有效配对报文后更换
+nonce，旧报文不能再次改变当前选择。宿主保存信任过的设备身份；平板在应用私有
+存储中保存身份私钥和最多 16 台宿主的凭据。
 
 ## USB
 
-当前采用 Android USB 调试提供的 ADB reverse：
+桌面安装包包含 ADB 和对应第三方声明，用户无需另外安装 Android SDK。
+USB 使用 ADB reverse，仍需要 Android 的系统授权：
 
 ```text
-Android 127.0.0.1:24819 -> USB/ADB -> 电脑 127.0.0.1:24819
+平板 127.0.0.1:24819 -> USB / ADB -> 宿主配置的 TCP 端口
 ```
 
-```bash
-python3 reflection usb connect
-python3 reflection pair-android --connect
+1. 在平板开启开发者选项和 USB 调试；Reflection 提供跳转系统设置的入口。
+2. 用支持数据传输的 USB 线连接电脑。
+3. 在 Android 系统弹窗中允许这台电脑调试。
+
+宿主只处理 ADB 已授权的物理 USB 设备，不自动确认调试授权，也不把无线 ADB
+误当成 USB。它获取平板身份、派生并下发专用凭据、建立反向转发，并定期维护
+转发和连接状态。拔插 USB 后自动恢复。USB 调试授权本身承担首次信任确认。
+这是 USB 调试通道，不是 USB HID gadget。dry-run 不自动下发 USB 配对信息。
+
+已授权的 USB 平板也会出现在宿主的 Nearby tablets 列表，显示设备名和六位设备码。
+首次没有其他已选宿主时自动连接；需要换平板或换电脑时，在目标电脑点击该平板的
+**Connect**。这一操作通过受系统权限保护的 USB 通道明确选择双方，不要求输入
+地址或密钥，也不会重复弹出局域网确认码。后台保活、重新插线和宿主重启仅维护
+凭据及通道，不会覆盖平板已经保存的宿主选择。USB 拔出或授权失效后，相应 USB
+条目消失；执行连接时还会再次检查设备身份和系统授权。
+
+## 优选链路与断线恢复
+
+先遵循用户最近选择的宿主，再在该宿主的可用链路中选择：
+
+```text
+USB > Wi-Fi / 局域网 > 已配对的 Bluetooth Classic
 ```
 
-拔插 USB 或重新启动 ADB 后，必要时再次运行 `usb connect`。移除转发：
+选择电脑 B 后，仍插着电脑 A 的 USB 不会让应用切回 A。连接失败时尝试其他候选
+地址和已授权设备。健康蓝牙连接只会升级到实时发现的 LAN 地址或有新鲜 USB
+可用信息的通道，不会因过期保存的 IP 反复断开。失败候选使用退避，协议认证心跳、
+超时与有界队列继续负责会话健康检查。
 
-```bash
-python3 reflection android disconnect
-python3 reflection usb disconnect
-```
+主动升级等待抬笔；重连不会续发丢失 DOWN 的笔画。宿主切换平板时释放旧笔和
+触摸状态，并限制旧平板抢回新选择的会话。宿主重启保留已批准身份，可以让已信任
+平板重新连接。
 
-这不是 USB HID gadget，也不会绕过设备的 USB 调试授权。它适用于无需 root
-的调试部署；后续普通用户安装体验需要另行设计，不能把“插线即可当 HID”
-作为当前功能。
+## 多网络接口
 
-多台设备连接时在 Android 操作中传入 `--serial`。未指定设备且检测到多台时，
-工具会报错，避免把配置发送给另一台设备。
+新配置默认监听 `0.0.0.0`。UDP `24820` 用于发现；输入 TCP 端口默认 `24819`。
+客户端向每个活动 IPv4 接口的广播地址发出查询，宿主监听所有接口并向来源回复。
+回复绑定本次 nonce、端口和宿主身份，并使用设备凭据进行 HMAC 校验，不含密钥。
 
-## Wi-Fi / 局域网
+旧配置显式保存的 `127.0.0.1` 不会被覆盖。桌面连接页显示
+**Enable local network & restart**；启用后可在所有本地 IPv4 接口发现设备。
+指定接口地址时只开放该接口。IPv6-only 网络自动发现尚未实现。
 
-平板和宿主需要网络可达；路由器的访客隔离、不同 VLAN、防火墙都可能阻断连接。
-先把宿主监听地址改为其局域网接口地址，或显式监听所有接口：
+访客隔离、VLAN、防火墙、禁止广播等网络策略可能阻断发现。不要将端口转发到公网。
+笔协议进行双向认证和逐帧完整性校验，但不加密笔坐标与时间信息；请使用 USB、
+可信局域网或加密 VPN。
 
-```bash
-# macOS：配置值采用 JSON
-python3 reflection server config set bind '"0.0.0.0"'
+## 蓝牙
 
-# Windows：配置值采用普通字符串
-python reflection server config set bind 0.0.0.0
-```
-
-重新启动宿主后，通过 ADB 把实际宿主地址写入平板：
-
-```bash
-python3 reflection pair-android --host 192.168.1.10 --connect
-```
-
-示例地址需要替换为自己的宿主地址。初次配对可以通过 USB；保存配置后，日常
-Wi-Fi 连接不依赖 USB。也可以在客户端面板输入地址和配对密钥。
-
-建议先测试 USB，再比较 Wi-Fi，区分采集问题与网络抖动。TCP 开启 `TCP_NODELAY`，
-不使用等待凑批的发送计时器；无线拥塞与重传仍可能造成尾部延迟。
-
-## 蓝牙 Classic RFCOMM
-
-当前实现的是经典蓝牙串口型有序流，服务 UUID：
+使用 Bluetooth Classic RFCOMM。输入服务 UUID：
 
 ```text
 7b011e5a-8b31-4c40-8d7a-3e6c6dcbb758
 ```
 
-先在操作系统设置中完成平板与电脑配对。应用只选择已配对设备，不自动打开
-系统蓝牙、不扫描周围设备、不替用户确认配对。
+独立的首次配对服务 UUID：
 
-```bash
-# macOS：在现有服务上启用 RFCOMM 入口
-python3 reflection server start --bluetooth --dry-run
-
-# Windows：选择 RFCOMM transport
-python reflection server start --transport bluetooth --dry-run
-
-# 列出 Android 已配对设备，并选择电脑的 Bluetooth 地址
-python3 reflection android paired
-python3 reflection pair-android --mode bluetooth \
-  --bluetooth AA:BB:CC:DD:EE:FF --connect
+```text
+7b011e5a-8b31-4c40-8d7a-3e6c6dcbb759
 ```
 
-Android 12+ 需要“附近的设备”权限。无 UI 的已授权 ADB 部署可使用：
+先在操作系统中完成蓝牙配对。Android 12 及以上还需要“附近的设备”权限。
+应用只尝试已配对设备，继续验证 Reflection 凭据，不打开系统蓝牙或代替用户授权。
+普通宿主尽可能同时提供 TCP 和 RFCOMM；缺少蓝牙适配器或权限不会阻止 USB/LAN。
+macOS 可用 `--no-bluetooth` 关闭 RFCOMM；dry-run 需要显式 `--bluetooth` 才启动蓝牙。
+Windows 保留原有 transport 配置以兼容高级用法。
+macOS 在适配器或权限暂不可用时按 1、2、4、8、16、30 秒的间隔重试，后续间隔
+上限为 30 秒；适配器恢复后重新发布 Reflection 服务。停止宿主会取消重试，
+应用不会代替用户打开系统蓝牙或修改权限。
+
+没有 LAN 或 USB 时也可以首次建立 Reflection 信任：平板通过独立、要求系统配对
+和链路加密的服务公告身份；电脑设备列表显示平板及其设备码。在电脑点击
+**Trust & connect**，再在平板核对并允许两端相同的确认码。流程与 LAN 相同，
+系统蓝牙配对不能替代应用信任。正在连接另一台平板时，发现请求不会打断输入；
+只有宿主明确选择新平板时才切换会话。
+
+配对服务每次连接只接受一个请求，使用协议 v1 的长度前缀、`0x04` 公告和
+`0x05` 回复。正文最多 1200 字节；未批准时返回 `REFLECTION-PENDING/1`，
+批准后返回与 LAN 相同的加密凭据。批准缓存绑定设备身份和 nonce，可通过重复
+请求补偿丢包，不会把凭据发给其他身份。不同蓝牙适配器的互通和实际手写延迟
+仍需实机验证。
+
+## CLI 与构建
+
+原有 `pair-android`、`android configure/connect/disconnect` 和手动端口方式仍可诊断。
+macOS/Windows 原生宿主提供：
 
 ```bash
-adb shell pm grant io.github.linloir.reflection android.permission.BLUETOOTH_CONNECT
+reflection-host pairing list
+reflection-host pairing trust TABLET_ID
 ```
 
-macOS 需要系统蓝牙权限和可用的经典蓝牙适配器。Windows 使用系统
-`AF_BTH` / RFCOMM 与 SDP，要求链路配对和加密。不同适配器与系统版本的
-互通情况仍需实机验证；编译成功不代表完成蓝牙验证。
+LAN / 蓝牙批准返回本地的 `confirmationCode`，在平板上核对；已授权 USB 的明确
+选择返回 `usbSelected: true`，不需要确认码。CLI 不打印新派发凭据。
+构建桌面安装包时，从 `REFLECTION_PLATFORM_TOOLS` 或 SDK 的 `platform-tools`
+目录复制 ADB 和声明。macOS 包含 `Contents/Resources/platform-tools/adb`；
+Windows 包含 `platform-tools/adb.exe` 及所需 DLL。缺少依赖时打包失败。
+构建机需要 Platform-Tools，最终用户不需要 SDK。
 
-这不是 BLE GATT，也不是通过 PAN 转发 TCP。未来 iPad 的蓝牙传输不能直接
-假设可以使用任意 Classic RFCOMM；参见 [iOS 规划](../client/ios/README.md)。
+诊断顺序：
 
-## 排查顺序
+1. 确认宿主启动、平板应用在前台、两端验证码匹配。
+2. `python3 reflection doctor` 检查工具、宿主权限和 USB 设备。
+3. `python3 reflection android status` 查看连接、RTT 和输入异常计数。
+4. 用 dry-run 验证协议，再检查辅助功能 / Windows Ink 权限及目标应用。
 
-1. `python3 reflection doctor`：查看工具、宿主权限和 Android 设备数量。
-2. `python3 reflection android status`：查看连接、队列溢出、RTT 和异常轴计数。
-3. `python3 reflection android devices`：查看 Android 暴露的轴范围。
-4. 以 `start --dry-run` 验证接收；macOS 可用 `server status` 查看快照。
-5. 连接正常后再检查宿主系统权限、应用的 Windows Ink / tablet 设置和映射。
+协议测试不等于验证了蓝牙硬件、USB 授权 UI、系统防火墙或笔尖到墨迹实际延迟。
+测试说明见 [testing.md](testing.md)。
 
-`probe` 会创建另一个客户端，所以先断开正在占用宿主的平板。它不能用来测量
-另一台平板正在使用的连接延迟。Android `status.rttMicros` 才来自该设备连接
-上的认证心跳。
+macOS 上可运行跨 Java / 原生宿主的首次配对与换设备检查：
+
+```bash
+bash client/android/scripts/test-pairing.sh
+```
+
+检查使用临时配置、临时 TCP 端口、回环 UDP 24820 和 dry-run，不下发 USB
+配置、不注入输入、不使用本机保存的密钥。若 UDP 24820 已被占用会报告 SKIP。
+它检查发现、RSA-OAEP 互通、双端确认码、设备专用凭据、A 切换 B、旧凭据拒绝，
+以及宿主重启后三个已信任设备都能重新认证。蓝牙部分通过原生服务的回环中继
+端口检查独立配对、等待批准时不打断输入、报文长度与类型限制、批准缓存重试，
+以及在 LAN 和蓝牙公告之间保留批准；该检查不经过实体蓝牙无线电。

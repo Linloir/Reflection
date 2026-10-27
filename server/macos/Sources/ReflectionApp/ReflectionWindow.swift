@@ -36,6 +36,7 @@ struct ReflectionWindow: View {
     @ViewState private var selected: SettingsPage? = .overview
     @ViewState private var revealToken = false
     @ViewState private var confirmDelete = false
+    @ViewState private var pendingTablet: DiscoveredTablet?
 
     var body: some View {
         navigation
@@ -49,6 +50,18 @@ struct ReflectionWindow: View {
             } message: {
                 Text("This removes the saved profile. The settings in the editor are kept.")
             }
+            .alert("Trust this tablet?", isPresented: Binding(
+                get: { pendingTablet != nil }, set: { if !$0 { pendingTablet = nil } })) {
+                    Button("Cancel", role: .cancel) { pendingTablet = nil }
+                    Button("Trust & connect") {
+                        if let tablet = pendingTablet { model.trustTablet(tablet) }
+                        pendingTablet = nil
+                    }
+                } message: {
+                    if let tablet = pendingTablet {
+                        Text("Compare \(tablet.code) with the code shown by Reflection on \(tablet.name). Only continue when both codes match.")
+                    }
+                }
     }
 
     @ViewBuilder
@@ -466,6 +479,43 @@ struct ReflectionWindow: View {
     private var connection: some View {
         VStack(spacing: 18) {
             SettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Nearby tablets").font(.headline)
+                    Text("Open Reflection on the tablet. Select it here and compare its six-digit code. Once trusted, USB, Wi-Fi and paired Bluetooth reconnect automatically.")
+                        .font(.caption).foregroundColor(.secondary)
+                    if !model.pairingConfirmation.isEmpty {
+                        Text(model.pairingConfirmation).font(.system(size: 30, weight: .medium, design: .monospaced))
+                        Text("Compare this confirmation code with the tablet's prompt before approving this computer.")
+                            .font(.caption)
+                    }
+                    if model.configuration.bind == "127.0.0.1" {
+                        Text("This configuration only listens locally. Enable the local network to discover tablets over Wi-Fi.")
+                            .font(.caption)
+                        Button("Enable local network & restart") {
+                            model.configuration.bind = "0.0.0.0"
+                            model.applyAndRestart()
+                        }.disabled(model.busy)
+                    }
+                    if model.discoveredTablets.isEmpty {
+                        Text(model.running ? "Looking for tablets on your local networks…" : "Start the host to discover tablets.")
+                            .foregroundColor(.secondary)
+                    }
+                    ForEach(model.discoveredTablets) { tablet in
+                        Divider()
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(tablet.name).font(.body.weight(.medium))
+                                Text("\(tablet.address) · \(tablet.code)")
+                                    .font(.system(.caption, design: .monospaced)).foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button(tablet.trusted ? "Connect" : "Trust & connect") { pendingTablet = tablet }
+                                .disabled(model.busy)
+                        }
+                    }
+                }
+            }
+            SettingsCard {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Host address").font(.headline)
                     HStack {
@@ -474,7 +524,7 @@ struct ReflectionWindow: View {
                         TextField("Port", value: $model.configuration.port, format: .number.grouping(.never))
                             .textFieldStyle(.roundedBorder).frame(width: 95).accessibilityLabel("Port")
                     }
-                    Text("USB uses 127.0.0.1 with ADB reverse forwarding. For Wi-Fi, listen on your network address or 0.0.0.0, then enter this Mac's local address on the tablet.")
+                    Text("USB forwarding is prepared automatically with the bundled ADB. Use 0.0.0.0 to discover tablets on every local IPv4 network interface.")
                         .font(.caption).foregroundColor(.secondary)
                     Divider()
                     Text("Pairing key").font(.headline)
@@ -488,7 +538,7 @@ struct ReflectionWindow: View {
                         Button("Copy") { model.copyToken() }
                     }
                     Toggle("Show pairing key", isOn: $revealToken).font(.caption)
-                    Text("Use the same key on the tablet. Keep it private.")
+                    Text("Managed automatically during approved pairing. Advanced tools may use this key; keep it private.")
                         .font(.caption).foregroundColor(.secondary)
                 }
             }

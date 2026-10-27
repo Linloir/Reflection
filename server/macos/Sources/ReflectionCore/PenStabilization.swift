@@ -182,6 +182,7 @@ public final class HostPenStabilizer {
     private var rawX = 0.0, rawY = 0.0, filteredX = 0.0, filteredY = 0.0
     private var derivativeX = 0.0, derivativeY = 0.0
     private var noiseEstimator: AdaptivePenNoise
+    private var sessionNoiseDefault: Double?
 
     public init(configuration: StabilizationConfiguration) {
         self.configuration = configuration
@@ -201,6 +202,22 @@ public final class HostPenStabilizer {
         lastSafe = nil; hoverCandidate = nil; touching = false; suppressed = false; needsDown = waitForDown
         resetFilter()
         noiseEstimator.reset(prior: configuration.noise)
+    }
+
+    public func setSessionNoise(_ noise: Double) throws {
+        guard !touching, noise.isFinite, noise == 0 || (0.00001...0.02).contains(noise) else {
+            throw ReflectionError.invalid("Invalid tablet noise or active pen contact")
+        }
+        if noise == 0 { clearSessionNoise(); return }
+        if sessionNoiseDefault == nil { sessionNoiseDefault = configuration.noise }
+        configuration.noise = noise
+        reset()
+    }
+
+    public func clearSessionNoise() {
+        if let original = sessionNoiseDefault { configuration.noise = original }
+        sessionNoiseDefault = nil
+        reset()
     }
 
     public func apply(_ sample: PenSample) -> PenSample? {

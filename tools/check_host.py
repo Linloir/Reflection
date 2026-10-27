@@ -99,6 +99,54 @@ def main():
                     client.ping()
                 checks.append("hover/down/move/up/leave through real host parser")
 
+                if args.platform == "macos":
+                    def touchpad(client, sequence):
+                        payload = struct.pack(">QQffBB6x", sequence, sequence, 0, 0, 1, 1)
+                        client.stream.sendall(encode_frame(0x23, payload, client.session_key))
+
+                    def negotiate_touchpad(client):
+                        client.stream.sendall(encode_frame(0x20, b'{"touchpad":1}', client.session_key))
+                        assert receive_frame(client.stream, client.session_key) == (0x24, b"\x01")
+
+                    def require_touchpad_events(client, expected, pen_sequence):
+                        status_path = config.with_suffix(".status.json")
+                        deadline = time.monotonic() + 2
+                        while time.monotonic() < deadline:
+                            client.ping()
+                            if status_path.exists():
+                                status = json.loads(status_path.read_text())
+                                if status.get("lastSequence") == pen_sequence:
+                                    assert status.get("touchpadEvents") == expected, status
+                                    return
+                            time.sleep(0.05)
+                        raise AssertionError("touchpad backend count did not become " + str(expected))
+
+                    with connect() as client:
+                        negotiate_touchpad(client)
+                        client.send_sample(PenSample(1, 1, 0.3, 0.4, 0.5, phase=1))
+                        touchpad(client, 1)
+                        client.send_sample(PenSample(2, 2, 0.3, 0.4, 0.5, phase=2))
+                        client.ping()
+                        require_contact(True)
+                        require_touchpad_events(client, 0, 2)
+                        touchpad(client, 1)
+                        wait_closed(client.stream)
+                        require_contact(False)
+                    checks.append("pen contact blocks touchpad injection without bypassing replay validation")
+
+                    with connect() as client:
+                        negotiate_touchpad(client)
+                        touchpad(client, 1)
+                        client.send_sample(PenSample(1, 1, 0.3, 0.4, 0.5, phase=1))
+                        touchpad(client, 2)
+                        client.send_sample(PenSample(2, 2, 0.3, 0.4, 0, phase=3))
+                        touchpad(client, 3)
+                        client.send_sample(PenSample(3, 3, 0.3, 0.4, 0, phase=0))
+                        client.ping()
+                        require_touchpad_events(client, 2, 3)
+                        require_contact(False)
+                    checks.append("touchpad resumes after pen release and only eligible gestures reach the backend")
+
                 with connect() as client:
                     sample = PenSample(1, 1, 0.3, 0.4, 0.5, phase=1)
                     client.send_sample(sample)

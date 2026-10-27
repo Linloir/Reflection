@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.view.InputDevice;
 import io.github.linloir.reflection.core.PenSample;
 import io.github.linloir.reflection.core.MappingState;
+import io.github.linloir.reflection.core.RawTouchpadFrame;
 import io.github.linloir.reflection.core.Wire;
 import io.github.linloir.reflection.input.PenInput;
 import io.github.linloir.reflection.transport.PenTransport;
@@ -32,10 +33,26 @@ public final class Controller {
     private volatile PenTransport transport;
     private volatile PenSample latest;
     private int surfaceWidth, surfaceHeight, surfaceRotation;
+    private float calibrationNoise;
     private long received;
     private int clearGeneration;
     private volatile long configurationRevision;
     private volatile long tiltRevision;
+    private AutomaticConnection automatic;
+    private volatile boolean automaticSuppressed;
+    private volatile String automaticStatus = "";
+    private volatile long usbLease;
+    private volatile String usbToken = "";
+    private volatile PairingIdentity identity;
+    private volatile TrustedHost pendingPairing;
+    public static final class TrustedHost {
+        public final String token, address, confirmationCode;
+        public final int port;
+        TrustedHost(String token, String address, int port) { this(token, address, port, ""); }
+        TrustedHost(String token, String address, int port, String confirmationCode) {
+            this.token = token; this.address = address; this.port = port; this.confirmationCode = confirmationCode;
+        }
+    }
 
     private Controller(Context context) {
         this.context = context;
@@ -76,10 +93,17 @@ public final class Controller {
     private static IllegalStateException hostManaged() {
         return new IllegalStateException("Pen stabilization and calibration are managed in the desktop host");
     }
+    public synchronized void setCalibrationNoise(float noise) {
+        if (!io.github.linloir.reflection.core.NoiseCalibration.valid(noise))
+            throw new IllegalArgumentException("Calibration noise must be zero or 0.00001..0.02");
+        calibrationNoise = noise;
+        if (transport != null) transport.setCalibrationNoise(noise);
+    }
     public synchronized boolean setInputGeometry(int width, int height, int rotation) {
         if (width < 0 || height < 0 || rotation < 0 || rotation > 3) return false;
         if (surfaceWidth == width && surfaceHeight == height && surfaceRotation == rotation) return false;
         surfaceWidth = width; surfaceHeight = height; surfaceRotation = rotation;
+        if (transport != null) updateRawTouchpadSurface(transport);
         return true;
     }
 
@@ -111,11 +135,157 @@ public final class Controller {
             final String host = host(); final int port = port();
             next = new PenTransport(() -> new TcpLink(host, port), token());
         }
+        configureTransport(next);
         transport = next; next.start();
     }
     public synchronized void disconnect() {
+        stopAutomaticConnection();
+        disconnectTransport();
+    }
+    private void disconnectTransport() {
         PenTransport current = transport; transport = null;
         if (current != null) current.stop();
+    }
+    public synchronized void startAutomaticConnection() {
+        automaticSuppressed = false;
+        if (automatic != null) return;
+        identity = new PairingIdentity(context, this);
+        automatic = new AutomaticConnection(context, this);
+        automatic.start();
+    }
+    public synchronized void stopAutomaticConnection() {
+        automaticSuppressed = true;
+        AutomaticConnection current = automatic; automatic = null;
+        if (current != null) current.stop();
+        automaticStatus = "";
+    }
+    public boolean connected() { PenTransport current = transport; return current != null && current.connected(); }
+    public String connectionSummary() {
+        String value = automaticStatus;
+        return value.isEmpty() ? (connected() ? "已连接" : "未连接") : value;
+    }
+    void setAutomaticStatus(String status) { automaticStatus = status; }
+    public boolean penContact() {
+        PenSample sample = latest;
+        return sample != null && (sample.phase == PenSample.DOWN || sample.phase == PenSample.MOVE);
+    }
+    boolean usbLeaseFresh() { return usbLease != 0 && android.os.SystemClock.elapsedRealtime() - usbLease < 12000; }
+    String usbToken() { return usbToken.isEmpty() ? token() : usbToken; }
+    PairingIdentity pairingIdentity() { return identity; }
+    public String pairingCode() { PairingIdentity current = identity; return current == null ? "------" : current.code(); }
+    public synchronized String pairingIdentityID() {
+        if (identity == null) identity = new PairingIdentity(context, this);
+        return identity.identifier();
+    }
+    public int trustedHostCount() { return trustedHosts().size(); }
+    public String pendingPairingSummary() {
+        TrustedHost pending = pendingPairing;
+        return pending == null ? "" : "核对电脑上显示的确认码：" + pending.confirmationCode
+            + "\n宿主机 " + pending.address + " 请求连接。仅在两端确认码一致时允许。";
+    }
+    public synchronized void approvePendingPairing() {
+        TrustedHost pending = pendingPairing; pendingPairing = null;
+        if (pending != null) trustHost(pending.token, pending.address, pending.port, true);
+    }
+    public void rejectPendingPairing() { pendingPairing = null; }
+    public java.util.List<TrustedHost> trustedHosts() {
+        java.util.List<TrustedHost> result = new java.util.ArrayList<>();
+        try {
+            JSONArray stored = new JSONArray(prefs.getString("trustedHosts", "[]"));
+            for (int i = 0; i < stored.length(); i++) {
+                JSONObject host = stored.getJSONObject(i);
+                result.add(new TrustedHost(host.getString("token"), host.getString("address"), host.getInt("port")));
+            }
+        } catch (JSONException ignored) {}
+        String legacy = token();
+        if (!legacy.isEmpty()) {
+            boolean found = false;
+            for (TrustedHost host : result) if (host.token.equals(legacy)) found = true;
+            if (!found) result.add(new TrustedHost(legacy, host(), port()));
+        }
+        return result;
+    }
+    String preferredHostToken() { return prefs.getString("preferredHost", token()); }
+    public synchronized void trustHost(String token, String address, int port, boolean approved) {
+        trustHost(token, address, port, approved, "");
+    }
+    synchronized void requestHostTrust(PairingIdentity owner, String token, String address, int port, String nonce) throws java.io.IOException {
+        if (identity != owner || automatic == null) return;
+        byte[] digest = Wire.hmac(Wire.token(token), ("Reflection/pair-confirm/v1\n" + nonce).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        int number = ((digest[0] & 255) << 16 | (digest[1] & 255) << 8 | (digest[2] & 255)) % 1000000;
+        trustHost(token, address, port, false, String.format(java.util.Locale.ROOT, "%06d", number));
+    }
+    synchronized void requestBluetoothHostTrust(PairingIdentity owner, String token, String address, String nonce) throws java.io.IOException {
+        if (!BluetoothAdapter.checkBluetoothAddress(address)) throw new IllegalArgumentException("Invalid Bluetooth host address");
+        requestHostTrust(owner, token, "bluetooth:" + address, 24819, nonce);
+    }
+    private void trustHost(String token, String address, int port, boolean approved, String confirmationCode) {
+        Wire.token(token);
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Invalid host port");
+        java.util.List<TrustedHost> hosts = trustedHosts();
+        boolean known = false;
+        for (TrustedHost host : hosts) if (host.token.equals(token)) known = true;
+        if (!known && !approved) {
+            if (pendingPairing == null) pendingPairing = new TrustedHost(token, address, port, confirmationCode);
+            return;
+        }
+        saveTrustedHost(token, address, port, true);
+    }
+    private void saveTrustedHost(String token, String address, int port, boolean select) {
+        JSONArray stored = new JSONArray();
+        try {
+            stored.put(new JSONObject().put("token", token).put("address", address).put("port", port));
+            for (TrustedHost host : trustedHosts()) if (!host.token.equals(token) && stored.length() < 16)
+                stored.put(new JSONObject().put("token", host.token).put("address", host.address).put("port", host.port));
+        } catch (JSONException error) { throw new IllegalStateException(error); }
+        SharedPreferences.Editor edit = prefs.edit().putString("trustedHosts", stored.toString());
+        if (select) edit.putString("preferredHost", token).putString("token", token).putString("host", address).putInt("port", port);
+        if (!edit.commit()) throw new IllegalStateException("Could not save trusted host");
+        configurationRevision++;
+    }
+    synchronized void connectAutomatically(AutomaticConnection owner, String mode, String address, int port, String token) {
+        if (automatic != owner) return;
+        disconnectTransport();
+        final PenTransport next;
+        if ("bluetooth".equals(mode)) {
+            requireBluetoothPermission();
+            BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            next = new PenTransport(() -> new BluetoothLink(adapter, address), token);
+        } else next = new PenTransport(() -> new TcpLink(address, port), token);
+        configureTransport(next);
+        transport = next; next.start();
+    }
+    private void configureTransport(PenTransport next) {
+        next.setCalibrationNoise(calibrationNoise);
+        updateRawTouchpadSurface(next);
+    }
+    private void updateRawTouchpadSurface(PenTransport next) {
+        android.util.DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+        next.setRawTouchpadDimensions(
+            RawTouchpadFrame.physicalDimension(surfaceWidth > 0 ? surfaceWidth : metrics.widthPixels, metrics.xdpi, metrics.density, 10000),
+            RawTouchpadFrame.physicalDimension(surfaceHeight > 0 ? surfaceHeight : metrics.heightPixels, metrics.ydpi, metrics.density, 6000));
+    }
+    /** Called only by the DUMP-protected ADB receiver after the system USB trust prompt. */
+    public synchronized void provisionUsb(String token, boolean select) {
+        Wire.token(token);
+        token = token.toLowerCase(java.util.Locale.ROOT);
+        TrustedHost known = null;
+        for (TrustedHost host : trustedHosts()) if (host.token.equals(token)) known = host;
+        if (known == null)
+            saveTrustedHost(token, "127.0.0.1", 24819, select || preferredHostToken().isEmpty());
+        else if (select)
+            saveTrustedHost(token, known.address, known.port, true);
+        usbToken = token;
+        usbLease = android.os.SystemClock.elapsedRealtime();
+        // A lease refresh is not a user selection, even after either process restarts.
+        if (select || !automaticSuppressed) startAutomaticConnection();
+    }
+    public synchronized void forgetHost() {
+        disconnect();
+        prefs.edit().remove("token").remove("host").remove("bluetooth").remove("trustedHosts").remove("preferredHost").apply();
+        usbLease = 0; usbToken = ""; pendingPairing = null; configurationRevision++;
+        startAutomaticConnection();
     }
     /** Raw normalized capture is shared unchanged by local preview and the host transport. */
     public synchronized PenSample accept(PenSample sample) {
@@ -125,6 +295,22 @@ public final class Controller {
         return sample;
     }
     public PenSample latest() { return latest; }
+    public void submitTouchpad(io.github.linloir.reflection.core.TouchpadEvent event) {
+        PenTransport current = transport;
+        if (current != null) current.submitTouchpad(event);
+    }
+    public boolean touchpadSupported() {
+        PenTransport current = transport;
+        return current != null && current.touchpadSupported();
+    }
+    public void submitRawTouchpad(RawTouchpadFrame frame) {
+        PenTransport current = transport;
+        if (current != null) current.submitRawTouchpad(frame);
+    }
+    public boolean rawTouchpadSupported() {
+        PenTransport current = transport;
+        return current != null && current.rawTouchpadSupported();
+    }
     public MappingState mapping() {
         PenTransport current = transport;
         return current == null ? null : current.mapping();
@@ -156,6 +342,8 @@ public final class Controller {
     public synchronized JSONObject status() throws JSONException {
         PenTransport t = transport;
         JSONObject o = new JSONObject().put("mode", mode()).put("bluetooth", bluetoothAddress()).put("host", host()).put("port", port()).put("configured", !token().isEmpty())
+            .put("automaticConnection", automatic != null).put("connectionSummary", connectionSummary())
+            .put("usbAvailable", usbLeaseFresh())
             .put("preview", preview()).put("connected", t != null && t.connected())
             .put("status", t == null ? "Disconnected" : t.status()).put("samples", received)
             .put("sent", t == null ? 0 : t.sent()).put("queueOverflows", t == null ? 0 : t.overflows())
@@ -172,6 +360,10 @@ public final class Controller {
                 .put("vendorId", PenInput.lastDeviceVendor()).put("productId", PenInput.lastDeviceProduct()).put("source", PenInput.lastSource()))
             .put("stabilization", stabilizationStatus()).put("mapping", mappingStatus())
             .put("rawCoordinates", true).put("hostStabilization", true)
+            .put("tabletCalibration", new JSONObject()
+                .put("noise", calibrationNoise).put("negotiated", t != null && t.calibrationSupported())
+                .put("acknowledged", t == null ? 0 : t.calibrationAcknowledged())
+                .put("appliedNoise", t == null ? 0 : t.appliedCalibrationNoise()))
             .put("inputDiagnostics", new JSONObject().put("ignoredForeignEvents", PenInput.ignoredForeignEvents())
                 .put("ignoredHoverDuringContact", PenInput.ignoredHoverDuringContact())
                 .put("invalidCoordinateSamples", PenInput.invalidCoordinateSamples()).put("staleSamples", PenInput.staleSamples()));

@@ -1,6 +1,8 @@
 #include "reflection/config.hpp"
 #include "reflection/protocol.hpp"
 #include "reflection/display_mapping.hpp"
+#include "reflection/discovery.hpp"
+#include "reflection/raw_touchpad.hpp"
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -38,6 +40,153 @@ static std::vector<uint8_t> fixture_bytes(const std::string& text) {
 
 int main() {
     try {
+        auto calibration = fixture_bytes("00000000000000013b449ba6");
+        const auto decoded_calibration = decode_tablet_calibration(calibration, 0);
+        require(decoded_calibration.sequence == 1 && std::abs(decoded_calibration.noise - .003) < 1e-8,
+                "cross-platform tablet calibration vector");
+        reject([&] { decode_tablet_calibration(calibration, 1); }, "tablet calibration replay rejected");
+        auto bad_calibration = calibration; put_float(bad_calibration, 8, std::numeric_limits<float>::quiet_NaN());
+        reject([&] { decode_tablet_calibration(bad_calibration, 0); }, "tablet calibration NaN rejected");
+        bad_calibration = calibration; put_float(bad_calibration, 8, .03f);
+        reject([&] { decode_tablet_calibration(bad_calibration, 0); }, "tablet calibration bound enforced");
+        bad_calibration = calibration; put_float(bad_calibration, 8, .00001f);
+        require(decode_tablet_calibration(bad_calibration, 0).noise == .00001, "float lower bound normalized");
+        bad_calibration = calibration; put_float(bad_calibration, 8, 0);
+        require(decode_tablet_calibration(bad_calibration, 0).noise == 0, "tablet calibration reset sentinel");
+        const auto calibration_ack = tablet_calibration_ack(1, .003);
+        require(calibration_ack.size() == 13 && calibration_ack[0] == 1 &&
+                std::vector<uint8_t>(calibration_ack.begin() + 1, calibration_ack.end()) == calibration,
+                "tablet calibration acknowledgement encoding");
+        auto touch = fixture_bytes("000000000000000100000000000004d241480000c1a000000402000000000000");
+        const auto decoded_touch = decode_touchpad(touch);
+        require(decoded_touch.sequence == 1 && decoded_touch.timestamp_ns == 1234 &&
+            decoded_touch.kind == TouchpadKind::scroll && decoded_touch.fingers == 2 &&
+            decoded_touch.x == 12.5 && decoded_touch.y == -20, "cross-platform touchpad wire vector");
+        TouchpadSequenceGuard touch_guard;
+        touch_guard.accept(decoded_touch);
+        reject([&] { touch_guard.accept(decoded_touch); }, "touchpad replay rejected");
+        auto malformed_touch = touch;
+        malformed_touch[31] = 1;
+        reject([&] { decode_touchpad(malformed_touch); }, "touchpad reserved bytes rejected");
+        malformed_touch = touch; put_float(malformed_touch, 16, std::numeric_limits<float>::quiet_NaN());
+        reject([&] { decode_touchpad(malformed_touch); }, "touchpad NaN rejected");
+        malformed_touch = touch; malformed_touch[24] = 7;
+        reject([&] { decode_touchpad(malformed_touch); }, "touchpad swipe count and direction validated");
+        const std::string touch_caps = "{\"touchpad\":1}";
+        require(touchpad_capability({touch_caps.begin(), touch_caps.end()}), "touchpad capability opt-in");
+        const std::string duplicate_touch_caps = "{\"touchpad\":1,\"touchpad\":0}";
+        require(!touchpad_capability({duplicate_touch_caps.begin(), duplicate_touch_caps.end()}),
+                "duplicate touchpad capability rejected");
+        const std::string raw_caps = "{\"rawTouchpad\":1,\"rawTouchpadWidth\":10000,\"rawTouchpadHeight\":6000}";
+        Config native_config;
+        require(native_config.native_touchpad, "native touchpad defaults to available backend");
+        set_config(native_config, "touchpad.native", "false");
+        require(!native_config.native_touchpad && config_values(native_config, false).at("touchpad.native") == "false",
+                "native touchpad fallback can be selected through configuration");
+        reject([&] { set_config(native_config, "touchpad.native", "automatic"); }, "native touchpad setting rejects ambiguous values");
+        const auto raw_size = raw_touchpad_capability({raw_caps.begin(), raw_caps.end()});
+        require(raw_size && raw_size->width == 10000 && raw_size->height == 6000, "raw touchpad physical geometry negotiation");
+        for (const auto& bad : {
+             "{\"rawTouchpad\":1,\"rawTouchpadWidth\":1,\"rawTouchpadHeight\":6000}",
+             "{\"rawTouchpad\":1,\"rawTouchpadWidth\":10000.0,\"rawTouchpadHeight\":6000}",
+             "{\"rawTouchpad\":1,\"rawTouchpadWidth\":10000,\"rawTouchpadWidth\":10000,\"rawTouchpadHeight\":6000}",
+             "{\"rawTouchpad\":1,\"nested\":{\"rawTouchpadWidth\":10000},\"rawTouchpadHeight\":6000}",
+             "{\"rawTouchpad\":0,\"rawTouchpadWidth\":10000,\"rawTouchpadHeight\":6000}"}) {
+            const std::string value(bad);
+            require(!raw_touchpad_capability({value.begin(), value.end()}), "raw capability rejects invalid geometry or opt-in");
+        }
+        require(raw_touchpad_ack({10000, 6000}) == fixture_bytes("010000271000001770"), "raw geometry acknowledgement vector");
+        reject([] { raw_touchpad_ack({0, 6000}); }, "raw geometry acknowledgement rejects zero size");
+        const auto raw_vector = fixture_bytes("000000000000000100000000000004d2010000000000002a010100003e8000003f400000");
+        const auto raw_first = decode_raw_touchpad(raw_vector);
+        require(raw_first.sequence == 1 && raw_first.timestamp_ns == 1234 && raw_first.contacts.size() == 1 &&
+            raw_first.contacts[0].id == 42 && raw_first.contacts[0].x == .25 && raw_first.contacts[0].y == .75,
+            "raw contact cross-platform wire vector");
+        auto invalid_raw = raw_vector; invalid_raw[18] = 1;
+        reject([&] { decode_raw_touchpad(invalid_raw); }, "raw frame reserved bits rejected");
+        invalid_raw = raw_vector; invalid_raw[24] = 4;
+        reject([&] { decode_raw_touchpad(invalid_raw); }, "raw unknown contact phase rejected");
+        invalid_raw = raw_vector; put_float(invalid_raw, 28, std::numeric_limits<float>::quiet_NaN());
+        reject([&] { decode_raw_touchpad(invalid_raw); }, "raw nonfinite coordinate rejected");
+        invalid_raw = raw_vector; put_float(invalid_raw, 32, 1.01f);
+        reject([&] { decode_raw_touchpad(invalid_raw); }, "raw coordinate bounds enforced");
+        invalid_raw = raw_vector; invalid_raw[17] = 1;
+        reject([&] { decode_raw_touchpad(invalid_raw); }, "raw cancel cannot carry contacts");
+        invalid_raw = raw_vector; invalid_raw[16] = 2;
+        invalid_raw.insert(invalid_raw.end(), raw_vector.begin() + 20, raw_vector.end());
+        reject([&] { decode_raw_touchpad(invalid_raw); }, "raw duplicate contact IDs rejected");
+        RawTouchpadState raw_state;
+        require(raw_state.accept(raw_first).front().slot == 1, "raw pointer IDs use bounded Windows slots");
+        reject([&] { raw_state.accept(raw_first); }, "raw replay rejected");
+        auto raw_second = raw_first; raw_second.sequence = 2;
+        raw_second.contacts[0].phase = RawTouchpadPhase::update;
+        raw_second.contacts.push_back({0xffffffffu, RawTouchpadPhase::down, true, .8, .6});
+        const auto raw_two = raw_state.accept(raw_second);
+        require(raw_two[0].slot == 1 && raw_two[1].slot == 2, "raw contacts retain native slots across full frames");
+        auto raw_missing = raw_second; raw_missing.sequence = 3; raw_missing.contacts.erase(raw_missing.contacts.begin());
+        raw_missing.contacts[0].phase = RawTouchpadPhase::update;
+        reject([&] { raw_state.accept(raw_missing); }, "raw frame cannot silently drop an active contact");
+        auto raw_third = raw_second; raw_third.sequence = 3;
+        raw_third.contacts[0].phase = RawTouchpadPhase::up; raw_third.contacts[1].phase = RawTouchpadPhase::update;
+        require(raw_state.accept(raw_third).front().source.phase == RawTouchpadPhase::up && raw_state.active().size() == 1,
+                "raw terminal contact survives delivery before removal");
+        auto raw_fourth = raw_third; raw_fourth.sequence = 4; raw_fourth.contacts.erase(raw_fourth.contacts.begin());
+        raw_fourth.contacts.push_back({7, RawTouchpadPhase::down, true, .2, .4});
+        require(raw_state.accept(raw_fourth).back().slot == 1, "raw released slot can be reused next frame");
+        auto raw_cancel = decode_raw_touchpad(fixture_bytes("000000000000000500000000000004d200010000"));
+        require(raw_state.accept(raw_cancel).empty() && raw_state.active().empty(), "raw cancel clears all contacts");
+        auto raw_restart = raw_first; raw_restart.sequence = 6;
+        raw_restart.contacts[0].phase = RawTouchpadPhase::update;
+        reject([&] { raw_state.accept(raw_restart); }, "raw orphan update after cancellation rejected");
+        raw_restart.contacts[0].phase = RawTouchpadPhase::down;
+        require(raw_state.accept(raw_restart).front().slot == 1, "raw new gesture after cancellation starts cleanly");
+        raw_state.cancel();
+        raw_restart.sequence = 7; raw_restart.contacts[0].phase = RawTouchpadPhase::up;
+        reject([&] { raw_state.accept(raw_restart); }, "raw release from pen proximity cannot be revived by stale up");
+        auto raw_backwards = raw_first; raw_backwards.sequence = 7; raw_backwards.timestamp_ns = 1;
+        reject([&] { raw_state.accept(raw_backwards); }, "raw timestamp regression rejected after explicit release");
+        require(base64_encode({0, 1, 2, 3, 255}) == "AAECA/8=", "canonical base64 encode");
+        require(base64_decode("AAECA/8=") == std::vector<uint8_t>({0, 1, 2, 3, 255}), "canonical base64 decode");
+        reject([] { base64_decode("AAECA/9="); }, "base64 rejects unused nonzero bits");
+        reject([] { base64_decode("AA=A"); }, "base64 rejects internal padding");
+        reject([] { base64_decode("AA==AAAA"); }, "base64 rejects trailing content");
+        auto discovery = discovery_query("REFLECTION-DISCOVER/1 " + std::string(32, 'a') + " " + std::string(32, 'b'));
+        require(discovery && discovery->nonce == std::string(32, 'a') && discovery->device_id == std::string(32, 'b'),
+                "per-device discovery query");
+        require(!discovery_query("REFLECTION-DISCOVER/1 " + std::string(32, 'a') + " extra"),
+                "discovery query rejects malformed identity");
+        std::vector<uint8_t> modulus(256, 1); modulus[0] = 0x80;
+        const auto announcement = "REFLECTION-DEVICE/1\n" + std::string(32, 'a') + "\nVGFibGV0\n" +
+            base64_encode(modulus) + "\nAQAB\n" + std::string(32, 'b');
+        auto device = parse_device_announcement(announcement);
+        require(device && device->name == "Tablet" && device->modulus == modulus, "strict device announcement decode");
+        require(!parse_device_announcement(announcement + "\nextra"), "reject extra announcement fields");
+        std::vector<uint8_t> pairing_body{1, 4};
+        pairing_body.insert(pairing_body.end(), announcement.begin(), announcement.end());
+        const auto pairing_device = bluetooth_pairing_request(pairing_body);
+        require(pairing_device && pairing_device->name == "Tablet", "Bluetooth bootstrap accepts discovery identity");
+        pairing_body[0] = 2;
+        require(!bluetooth_pairing_request(pairing_body), "Bluetooth bootstrap rejects unknown protocol version");
+        pairing_body[0] = 1; pairing_body[1] = 0x23;
+        require(!bluetooth_pairing_request(pairing_body), "Bluetooth bootstrap never accepts input frames");
+        require(!bluetooth_pairing_request({1, 4}), "Bluetooth bootstrap rejects missing identity");
+        require(!bluetooth_pairing_request(std::vector<uint8_t>(1201)), "Bluetooth bootstrap bounds untrusted body");
+        auto bad_announcement = announcement;
+        bad_announcement.replace(bad_announcement.find("VGFibGV0"), 8, "Cg==");
+        require(!parse_device_announcement(bad_announcement), "reject control characters in device names");
+        bad_announcement = announcement;
+        bad_announcement.replace(bad_announcement.find("AQAB"), 4, "Aw==");
+        require(!parse_device_announcement(bad_announcement), "reject unsupported RSA exponent");
+        const std::vector<uint8_t> usb_device = {10, 9, 10, 3, 'a', 'b', 'c', 16, 8, 56, 1};
+        require(adb_usb_devices(usb_device) == std::vector<std::string>{"abc"}, "ADB USB type is authoritative without bus path");
+        auto network_device = usb_device; network_device.back() = 2;
+        require(adb_usb_devices(network_device).empty(), "ADB network transport never provisions USB credentials");
+        auto unauthorized_device = usb_device; unauthorized_device[8] = 3;
+        require(adb_usb_devices(unauthorized_device).empty(), "ADB unauthorized device is not provisioned");
+        auto malformed_devices = usb_device; malformed_devices.pop_back();
+        reject([&] { adb_usb_devices(malformed_devices); }, "ADB truncated protobuf rejected");
+        malformed_devices = usb_device; malformed_devices[1] = 11; malformed_devices.push_back(56); malformed_devices.push_back(1);
+        reject([&] { adb_usb_devices(malformed_devices); }, "ADB duplicate type field rejected");
         Mapping mapping;
         mapping.target = {-1920, 0, 1920, 1080};
         Mapper mapper(mapping);

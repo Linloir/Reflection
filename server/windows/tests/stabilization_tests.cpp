@@ -23,6 +23,17 @@ static double status_number(const std::string& status,const std::string& key) {
 int main() {
     try {
         StabilizationConfig config;
+        HostInput tablet_noise(config); tablet_noise.begin_session(true);
+        require(tablet_noise.set_session_noise(.003) == .003, "tablet noise applies during its session");
+        require(status_number(tablet_noise.status(), "estimated_noise_x") == .003, "tablet prior resets adaptive estimate");
+        tablet_noise.set_session_noise(.004);
+        require(tablet_noise.set_session_noise(0) == config.noise, "zero resets configured prior");
+        tablet_noise.set_session_noise(.002); tablet_noise.end_session(); tablet_noise.begin_session(true);
+        require(tablet_noise.set_session_noise(0) == config.noise, "tablet noise does not leak across devices");
+        tablet_noise.process(sample(0, Phase::down));
+        bool noisy_contact_rejected = false;
+        try { tablet_noise.set_session_noise(.005); } catch(const std::invalid_argument&) { noisy_contact_rejected = true; }
+        require(noisy_contact_rejected, "tablet noise cannot change mid-contact");
         HostInput guard(config); guard.begin_session(true);
         require(bool(guard.process(sample(0,Phase::down,.2,.2))),"initial down accepted");
         require(bool(guard.process(sample(1,Phase::move,.21,.2))),"continuous move accepted");

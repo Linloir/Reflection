@@ -1,4 +1,5 @@
 #pragma once
+#include "reflection/raw_touchpad.hpp"
 #include "reflection/config.hpp"
 #include <functional>
 #include <memory>
@@ -44,6 +45,9 @@ private:
 
 bool mapping_capability(const std::vector<uint8_t>& payload);
 bool stabilization_capability(const std::vector<uint8_t>& payload);
+bool touchpad_capability(const std::vector<uint8_t>& payload);
+std::optional<RawTouchpadSize> raw_touchpad_capability(const std::vector<uint8_t>& payload);
+bool tablet_calibration_capability(const std::vector<uint8_t>& payload);
 struct MappingRequest { uint64_t sequence; unsigned action; std::string display; };
 MappingRequest decode_mapping_request(const std::vector<uint8_t>& payload, uint64_t previous_sequence);
 

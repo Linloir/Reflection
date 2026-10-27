@@ -61,13 +61,14 @@ internal sealed class HostClient : IDisposable
         var output = process.StandardOutput.ReadToEndAsync();
         var errors = process.StandardError.ReadToEndAsync();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var timeoutSeconds = arguments.Length >= 2 && arguments[0] == "pairing" && arguments[1] == "trust" ? 35 : 10;
+        deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
         try { await process.WaitForExitAsync(deadline.Token); }
         catch (OperationCanceledException)
         {
             if (!process.HasExited) process.Kill();
             lifetime.Token.ThrowIfCancellationRequested();
-            throw new TimeoutException("The host command did not respond within 10 seconds.");
+            throw new TimeoutException($"The host command did not respond within {timeoutSeconds} seconds.");
         }
         var text = await output;
         var error = await errors;

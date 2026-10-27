@@ -1,5 +1,88 @@
 # 测试与验收
 
+## 客户端体验与自动发现
+
+本轮界面与连接改造的验证记录始于 2026-10-27。下面的历史实机记录不能自动
+视为新增界面、刷新驱动、配对服务或触摸板后端已经通过设备验收。
+
+```sh
+bash client/android/scripts/test-core.sh
+bash client/android/scripts/test-pairing.sh
+swift run --package-path server/macos reflection-core-checks
+bash server/windows/scripts/test-portable.sh
+```
+
+Android 核心检查包括五点仿射校准、面板旋转、倾斜匹配、边界显示器选择、
+混合指针隔离、触摸手势、笔迹消散与噪声先验。真实 TCP 检查覆盖能力协商、
+落笔前设置顺序、接触期间延后应用和重放拒绝。配对测试使用 Java 生成的独立
+RSA 身份与真实 macOS dry-run 宿主，检查发现、加密授权、双端确认码、切换平板、
+重启持久化，以及蓝牙配对中继的帧边界、重试与活动会话隔离。蓝牙中继检查使用
+回环 TCP，不经过无线电；UDP 24820 已被使用时测试明确跳过，不关闭已有服务。
+
+原始触摸板检查覆盖最多五指、稳定 ID、完整快照、共享跨语言字节向量、
+掌触与异常终止、区域变化后的尺寸协商、断线后丢弃残余手势、旧宿主兼容和
+禁止重复发送原生/兼容输入。Windows 原生后端经交叉编译与状态检查；
+dry-run 不创建设备，因此不会确认原生能力。真实 Windows 11 仍需验证鼠标、
+点击、滚动、捏合、旋转及用户自定义多指手势。macOS 当前只有兼容后端。
+
+Windows 上可运行 `server/windows/scripts/validate-isolated.ps1`，在临时源码副本中
+构建并执行原生检查和协议集成，生成逐项日志与 `validation.json`。测试宿主仅绑定
+回环地址，关闭自动发现及 USB 配置。默认不创建原生触摸板；`-ProbeNativeDevice`
+只额外测试创建设备与释放，不发送触点，不能作为原生手势已通过的依据。
+`-IncludeWinUI` 增加界面构建与桌面生命周期检查，不会启动已安装的 Reflection。
+
+macOS 的公开 CoreHID 注册探针与实际系统诊断保存在
+[`server/macos/Research`](../server/macos/Research/README.md)。2026-10-27 探针执行时，
+本机未发现可用的开发签名身份或授予虚拟 HID 能力的配置文件；这不表示开发者
+账户没有 Developer ID。临时签名探针添加该受限能力后被 AMFI 拒绝启动。
+后续验证需要为 App ID 启用对应能力，使用 Developer ID 签名并嵌入匹配的配置文件。
+现有结果不能判断描述符是否支持完整原生手势，也不能以注册成功代替系统手势验收。
+
+安装 APK 到可丢弃的模拟器后，从仓库根目录运行界面检查：
+
+```sh
+python3 client/android/tests/ui_smoke.py \
+  --serial emulator-5556 --output .local/ui-test/screens --fresh-state
+python3 client/android/tests/ui_smoke.py \
+  --serial emulator-5556 --output .local/ui-test/compact-screens \
+  --fresh-state --compact-first-run
+```
+
+脚本拒绝物理设备，`--fresh-state` 会清除指定模拟器内 Reflection 的数据。
+覆盖六页引导、五次实际注入的静止笔输入、下一步禁用/启用、取消与保存、进程重启、
+320 dp 高度的横屏引导、短工具栏翻页，以及分页设置。渐隐检查在断开宿主后注入
+本地笔画，验证可见笔迹出现，并在超时后恢复为与原画布完全相同的截图。
+检查结果与截图写入指定目录；显示尺寸和密度在脚本正常退出或异常退出时恢复。
+
+USB 宿主选择另有真实 Android 控制入口回归：
+
+```sh
+python3 client/android/tests/usb_selection_test.py \
+  --serial emulator-5556 --output .local/ui-test/usb-selection --fresh-state
+```
+
+该脚本会清除指定模拟器中的 Reflection 数据，并再次检查设备的模拟器属性。
+需要可调试 APK，或在可丢弃的测试镜像上先执行 `adb -s emulator-5556 root`；
+后者测试完应执行 `adb -s emulator-5556 unroot`。脚本使用虚构凭据，不注入笔或触摸。
+覆盖后台刷新不抢占选择、宿主 A/B 主动切换、大小写归一化、无效输入、手动断开、
+重启持久化，以及通过 USB 选择宿主后保留其原有局域网地址和其他宿主信任。
+它验证实际 Controller 和受保护广播入口，不代替物理 USB、ADB 授权或宿主设备列表验收。
+
+另外在已有 Android 15 / API 35 模拟器上注入重力方向，完成六项旋转检查：
+解锁时正常横屏、解锁时倒转横屏、竖屏重力下保持横屏、锁定倒转横屏后忽略相反
+重力、锁定正常横屏后忽略相反重力，以及解锁后恢复倒转。六项均通过，
+Reflection 始终位于前台且画面保持 1600×1000；系统报告的请求方向为
+`SCREEN_ORIENTATION_USER_LANDSCAPE`。检查后恢复原旋转设置与重力值，并关闭模拟器。
+结果、窗口状态和截图保存在本地 `.local/ui-test/rotation-check/`，其中
+`results.json` 记录每项预期方向和实际方向。这证明 Android 模拟器中的旋转与锁定
+行为，不代表 BOOX 重力传感器或物理屏幕已经完成验收。
+
+本轮实际完成 Android APK、macOS 应用及内置 ADB 构建；macOS 应用通过严格深层
+签名验证。Windows C++ 宿主通过可移植核心检查与 x64 完整交叉编译链接。
+当前没有物理 Android 设备连接，因此未提取 BOOX 笔记 APK，也没有新增真实电子纸
+残影、刷新速度、蓝牙无线电、Windows 运行时和目标绘画应用的验收结论。
+电子纸的具体适配证据见 [电子纸刷新](eink.md)。
+
 ## 橡皮擦悬浮与接触
 
 Windows runtime 回归检查倒置身份与擦除接触位独立，涵盖正常采样、静止保活、抬笔、

@@ -9,7 +9,8 @@ you trust and keep the host listener on a private network.
 - Client and server authenticate each other using a fresh challenge.
 - Every pen frame and heartbeat has an HMAC-SHA256 integrity tag.
 - Sample sequences and heartbeat timestamps reject in-session replay.
-- The listener defaults to loopback. LAN access must be enabled explicitly.
+- New host configurations listen on all local IPv4 interfaces for discovery.
+  Existing explicit loopback configurations stay local until changed.
 - Protocol v1 does **not encrypt** coordinates or timing. Use USB, a trusted
   local network, or an encrypted VPN; do not publish the port to the Internet.
 - Only one active client controls the host at a time.
@@ -17,6 +18,35 @@ you trust and keep the host listener on a private network.
 
 The Bluetooth transport still uses application-level authentication. Link
 pairing alone is not a replacement for the Reflection pairing key.
+First contact can use the separate Bluetooth pairing service after OS bonding;
+the bootstrap service requires an encrypted Bluetooth link and the same
+two-screen confirmation as LAN. Discovery requests cannot evict the active
+input session.
+
+## Automatic discovery and first contact
+
+Discovery advertises public device identities, never reusable credentials.
+The host verifies a tablet's six-digit identity code before approval, encrypts
+its device-specific credential with RSA-OAEP-SHA256, and displays a separate
+confirmation code derived from that credential and the tablet's nonce. The
+tablet independently computes the code and requires first-time approval.
+Compare the codes on both screens; a device name or IP address is not proof of
+identity. Confirmation codes are not sent in plaintext discovery packets.
+Approved encrypted offers are cached for the announced device identity and
+nonce, allowing dropped UDP replies or Bluetooth polls to retry. They cannot
+be decrypted by another tablet identity.
+
+Subsequent replies are authenticated with the saved credential and bound to
+fresh query nonces. Each approved tablet receives a separately derived
+credential. Selecting a new tablet closes the old host session and changes the
+credential admitted for the selected session. USB bootstrap is restricted to
+devices already authorized by Android's debugging trust prompt.
+
+Tablet identities and credentials reside in application-private storage.
+Host trust registries contain device identities, not copies of the installation
+key. Removing an app's data removes its saved trust and identity. Host key
+rotation invalidates all derived credentials; per-device revocation UI is not
+currently provided.
 
 ## Local configuration
 

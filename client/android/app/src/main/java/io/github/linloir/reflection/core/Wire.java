@@ -59,6 +59,22 @@ public final class Wire {
             .put((byte) p.phase).put((byte) p.tool).putShort((short) 0).array();
     }
 
+    public static byte[] touchpad(TouchpadEvent event, long sequence, long timestamp) {
+        return ByteBuffer.allocate(32).order(ByteOrder.BIG_ENDIAN).putLong(sequence).putLong(timestamp)
+            .putFloat(event.x).putFloat(event.y).put((byte) event.kind).put((byte) event.fingers)
+            .putShort((short) 0).putInt(0).array();
+    }
+
+    public static byte[] rawTouchpad(RawTouchpadFrame frame, long sequence, long timestamp) {
+        ByteBuffer body = ByteBuffer.allocate(20 + 16 * frame.contacts.length).order(ByteOrder.BIG_ENDIAN);
+        body.putLong(sequence).putLong(timestamp).put((byte) frame.contacts.length)
+            .put((byte) (frame.cancelled ? 1 : 0)).putShort((short) 0);
+        for (RawTouchpadFrame.Contact contact : frame.contacts)
+            body.putInt(contact.id).put((byte) contact.phase).put((byte) (contact.confident ? 1 : 0))
+                .putShort((short) 0).putFloat(contact.x).putFloat(contact.y);
+        return body.array();
+    }
+
     public static void write(DataOutputStream out, int type, byte[] payload, byte[] session) throws IOException {
         byte[] message = new byte[payload.length + 2];
         message[0] = VERSION; message[1] = (byte) type;

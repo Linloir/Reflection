@@ -48,9 +48,24 @@ public:
         space();
         return position_ == text_.size() && enabled_;
     }
+    std::optional<uint32_t> integer(uint32_t minimum, uint32_t maximum) {
+        if (!valid_utf8(text_)) return {};
+        space();
+        if (!object(0)) return {};
+        space();
+        if (position_ != text_.size() || !seen_ || raw_.empty() || raw_.size() > 9) return {};
+        uint32_t result = 0;
+        for (const char ch : raw_) {
+            if (ch < '0' || ch > '9') return {};
+            result = result * 10 + static_cast<unsigned>(ch - '0');
+        }
+        if (result < minimum || result > maximum) return {};
+        return result;
+    }
 private:
     std::string text_;
     std::string key_;
+    std::string raw_;
     size_t position_ = 0;
     bool seen_ = false, enabled_ = false;
     void space() {
@@ -156,7 +171,7 @@ private:
             if (!value(depth + 1)) return false;
             if (depth == 0 && key == key_) {
                 if (seen_) return false;
-                seen_ = true; enabled_ = text_.substr(start, position_ - start) == "1";
+                seen_ = true; raw_ = text_.substr(start, position_ - start); enabled_ = raw_ == "1";
             }
         } while (take(','));
         return take('}');
@@ -296,6 +311,20 @@ bool mapping_capability(const std::vector<uint8_t>& payload) {
 }
 bool stabilization_capability(const std::vector<uint8_t>& payload) {
     return CapabilityJSON(std::string(payload.begin(), payload.end()), "hostStabilization").mapping();
+}
+bool touchpad_capability(const std::vector<uint8_t>& payload) {
+    return CapabilityJSON(std::string(payload.begin(), payload.end()), "touchpad").mapping();
+}
+std::optional<RawTouchpadSize> raw_touchpad_capability(const std::vector<uint8_t>& payload) {
+    const std::string text(payload.begin(), payload.end());
+    if (!CapabilityJSON(text, "rawTouchpad").mapping()) return {};
+    const auto width = CapabilityJSON(text, "rawTouchpadWidth").integer(500, 100000);
+    const auto height = CapabilityJSON(text, "rawTouchpadHeight").integer(500, 100000);
+    if (!width || !height) return {};
+    return RawTouchpadSize{*width, *height};
+}
+bool tablet_calibration_capability(const std::vector<uint8_t>& payload) {
+    return CapabilityJSON(std::string(payload.begin(), payload.end()), "tabletCalibration").mapping();
 }
 
 MappingRequest decode_mapping_request(const std::vector<uint8_t>& payload, uint64_t previous_sequence) {

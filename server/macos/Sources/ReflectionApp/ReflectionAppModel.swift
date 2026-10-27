@@ -26,7 +26,8 @@ private enum HostCommand {
                 do {
                     try process.run()
                     let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6, execute: timeout)
+                    let timeoutSeconds: Double = arguments.starts(with: ["pairing", "trust"]) ? 35 : 6
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
                     let data = pipe.fileHandleForReading.readDataToEndOfFile()
                     process.waitUntilExit()
                     timeout.cancel()
@@ -59,7 +60,9 @@ final class ReflectionAppModel: ObservableObject {
     @Published var notice = ""
     @Published var hostLog = ""
     @Published var externalConfigurationChange = false
-    @Published var bluetooth = false
+    @Published var bluetooth = true
+    @Published var discoveredTablets: [DiscoveredTablet] = []
+    @Published var pairingConfirmation = ""
     @Published var dryRun = false
     @Published var tabletPointEvents = false
     @Published var mappingJSON = ""
@@ -298,6 +301,11 @@ final class ReflectionAppModel: ObservableObject {
             let data = try await HostCommand.run(executable: executable, configuration: configurationURL, arguments: ["status"])
             status = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
             running = status["processAlive"] as? Bool ?? false
+            if running, let discovered = try? await HostCommand.run(executable: executable,
+                    configuration: configurationURL, arguments: ["pairing", "list"]),
+               let tablets = try? JSONDecoder().decode([DiscoveredTablet].self, from: discovered) {
+                discoveredTablets = tablets
+            } else { discoveredTablets = [] }
             let pid = (status["pid"] as? NSNumber)?.intValue
             if pid != mappingProcessID { liveMapping = nil; mappingProcessID = pid }
             if running, let mapping = status["mapping"],
@@ -314,6 +322,25 @@ final class ReflectionAppModel: ObservableObject {
         }
         if let current = try? Data(contentsOf: configurationURL) {
             externalConfigurationChange = current != originalFileData
+        }
+    }
+
+    func trustTablet(_ tablet: DiscoveredTablet) {
+        guard running, !busy else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                let data = try await HostCommand.run(executable: executable, configuration: configurationURL,
+                                              arguments: ["pairing", "trust", tablet.id])
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                pairingConfirmation = response?["confirmationCode"] as? String ?? ""
+                if response?["usbSelected"] as? Bool == true {
+                    notice = "Selected \(tablet.name) through authorized USB. The tablet will connect to this Mac."
+                } else {
+                    notice = "Compare confirmation code \(pairingConfirmation) on \(tablet.name). Approve on the tablet only if both codes match."
+                }
+            } catch { self.error = String(describing: error) }
         }
     }
 
@@ -408,7 +435,7 @@ final class ReflectionAppModel: ObservableObject {
         let pipe = Pipe()
         process.executableURL = executable
         var arguments = ["--config", configurationURL.path, "start"]
-        if options.bluetooth { arguments.append("--bluetooth") }
+        arguments.append(options.bluetooth ? "--bluetooth" : "--no-bluetooth")
         if options.dryRun { arguments.append("--dry-run") }
         if options.tabletPointEvents { arguments.append("--tablet-point-events") }
         process.arguments = arguments

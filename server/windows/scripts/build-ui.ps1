@@ -26,6 +26,21 @@ Invoke-Checked "dotnet" @(
     "-p:Platform=$Architecture", "-p:ReflectionHostPath=$hostExecutable", "-o", $publishDirectory
 )
 
+# Build machines supply the official Android Platform-Tools; end users need no SDK or PATH setup.
+$platformTools = $env:REFLECTION_PLATFORM_TOOLS
+if (-not $platformTools -and $env:ANDROID_SDK_ROOT) { $platformTools = Join-Path $env:ANDROID_SDK_ROOT "platform-tools" }
+if (-not $platformTools -and $env:ANDROID_HOME) { $platformTools = Join-Path $env:ANDROID_HOME "platform-tools" }
+if (-not $platformTools) { $platformTools = Join-Path $env:LOCALAPPDATA "Android/Sdk/platform-tools" }
+$bundledTools = Join-Path $publishDirectory "platform-tools"
+New-Item -ItemType Directory -Force $bundledTools | Out-Null
+foreach ($file in @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "NOTICE.txt", "source.properties")) {
+    $source = Join-Path $platformTools $file
+    if (-not (Test-Path -LiteralPath $source)) {
+        throw "Missing official Android Platform-Tools file $source. Set REFLECTION_PLATFORM_TOOLS before packaging."
+    }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $bundledTools $file) -Force
+}
+
 # XAML compilation alone is not enough: the unpackaged app resolves these at startup.
 foreach ($resource in @("App.xbf", "MainWindow.xbf", "Reflection.Desktop.pri")) {
     if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory $resource))) {

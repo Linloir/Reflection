@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ColorSync
 import Security
 import Darwin
 
@@ -165,7 +166,7 @@ public struct MappingConfiguration: Codable, Equatable {
 
 public struct ServerConfiguration: Codable {
     public var version = 1
-    public var bind = "127.0.0.1"
+    public var bind = "0.0.0.0"
     public var port: UInt16 = 24819
     public var token: String
     public var mapping = MappingConfiguration()

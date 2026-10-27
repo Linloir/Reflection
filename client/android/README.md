@@ -1,6 +1,6 @@
 # Reflection Android
 
-将 Android 平板上的笔事件传给 Reflection 宿主机。客户端采用原生 Java / Android API，最低 Android 5.0（API 21）。界面只是演示和诊断入口；采集、协议、连接和配置分别位于独立模块，后续可以替换界面。
+将 Android 平板上的笔事件传给 Reflection 宿主机。客户端采用原生 Java / Android API，最低 Android 5.0（API 21）。横屏界面包括首次校准引导、书写区、工具栏和分页设置；采集、协议、连接、刷新驱动和配置分别位于独立模块。见 [客户端体验](../../docs/client-experience.md)。
 
 ## 能力与边界
 
@@ -55,13 +55,37 @@ gradle :app:assembleDebug -PreflectionApplicationId=io.github.linloir.reflection
 不传 Gradle 属性时仍生成原有 `io.github.linloir.reflection` 应用；每次构建产物都位于
 `app/build/outputs/apk/debug/app-debug.apk`，分发前请按用途另存。
 
-## 安装和 USB 连接
+## 安装与自动连接
+
+安装并打开客户端后，按首次引导完成校准或跳过不可用的项目。电脑端打开 Reflection
+并启动输入服务；客户端自动发现设备并重连。连接同一台电脑时优先 USB，其次
+Wi-Fi，最后蓝牙。已经明确选择的电脑优先于其他电脑的更快连接方式。
+
+- USB：连接数据线，开启 USB 调试，在 Android 系统提示中授权电脑。宿主包内置
+  ADB，自动设置转发和应用认证，不要求用户另外安装 ADB 或复制密钥。
+- Wi-Fi：连接同一局域网，在电脑端自动发现的设备列表中选择平板，核对设备码后
+  点击“信任并连接”，再在平板确认这台电脑。宿主检查所有可用局域网接口。
+- 蓝牙：先在系统中配对电脑，授予附近设备权限；电脑端会列出平板，按同样的
+  信任流程连接。首次信任使用独立 RFCOMM 服务，不要求先连 Wi-Fi 或 USB。
+
+平板可以记住多台电脑，电脑也可以记住多台平板。换一台新设备仍会自动发现，
+首次确认信任后保存独立凭据；无须手动输入地址或密钥。一台宿主同时接收一台
+选中的平板，切换平板会释放之前的输入会话。见 [连接与信任](../../docs/connectivity.md)。
+
+以下命令供开发者安装与诊断；正常界面连接不需要手动执行。
 
 先在 Android 设置中启用 USB 调试，并在设备上确认宿主机授权。USB 调试依赖 Android 的 ADB，不是无需驱动的 USB HID 数位板模式。
 
 ```sh
 ./scripts/reflection-android install
 ./scripts/reflection-android open
+```
+
+### 手动 USB 配置（诊断）
+
+需要覆盖自动选择时，CLI 仍支持显式配置：
+
+```sh
 adb reverse tcp:24819 tcp:24819
 ```
 
@@ -73,9 +97,9 @@ adb reverse tcp:24819 tcp:24819
 ./scripts/reflection-android status
 ```
 
-多个 ADB 设备同时连接时，在子命令前加 `--serial DEVICE_SERIAL`。界面上的 Connect 使用同一套控制器和配置。
+多个 ADB 设备同时连接时，在子命令前加 `--serial DEVICE_SERIAL`。界面的自动连接使用同一套控制器与认证协议。
 
-## Wi-Fi
+### 手动 Wi-Fi 配置（诊断）
 
 将宿主机配置为监听可达的局域网地址，并仅开放必要的防火墙端口，然后使用宿主机 IP：
 
@@ -86,11 +110,11 @@ adb reverse tcp:24819 tcp:24819
 
 每个会话执行双向 HMAC challenge-response，之后每帧独立认证。token 不作为明文网络字段发送，但坐标等内容没有加密。这不是 TLS 或面向不可信公网的连接方式；需要保密性时使用可信的加密网络。不要将监听端口直接暴露到互联网。
 
-## 蓝牙 RFCOMM
+### 手动蓝牙配置（诊断）
 
 1. 在 Android 与宿主机的系统设置中完成蓝牙配对。
 2. 在宿主机启用 Reflection RFCOMM 服务。服务 UUID 为 `7b011e5a-8b31-4c40-8d7a-3e6c6dcbb758`。
-3. Android 12 或更高版本需要 Nearby devices / `BLUETOOTH_CONNECT` 权限。UI 选择 Bluetooth 后点击 Connect 会请求权限；授权后再点击 Connect。CLI 也可授权：
+3. Android 12 或更高版本需要 Nearby devices / `BLUETOOTH_CONNECT` 权限。在“设置 → 连接 → 蓝牙”中请求权限并打开系统配对页。CLI 也可授权：
 
 ```sh
 ./scripts/reflection-android grant-bluetooth
@@ -123,9 +147,10 @@ Android 11 及更低版本不需要 `grant-bluetooth`。客户端不扫描附近
 
 CLI 使用显式 `ControlReceiver`，接收器要求平台 `android.permission.DUMP`，普通第三方应用没有该权限。ADB shell 与系统可以调用；配置、状态和 UI 共用 `Controller`，没有另一套隐藏行为。
 
-防抖和校准设置位于电脑端。平板界面只保留采集、连接、倾斜和屏幕映射；
-历史上保存的客户端防抖开关和校准数据不会参与当前输入路径。能力帧中的
-`hostStabilization: 1` 表示发送的是未做客户端平滑的原始坐标；预览也使用同一原始样本。
+实际防抖仍在电脑端执行。平板新增五点坐标修正、静止噪声测量和倾斜匹配；
+测得噪声通过独立协商的扩展按会话应用。历史客户端平滑开关不参与当前路径。
+`hostStabilization: 1` 表示客户端不做平滑；五点坐标校准可修正传输坐标，
+本地预览仍贴合物理笔尖的采样位置。
 详细步骤见 [防抖与校准](../../docs/stabilization.md)。
 
 不使用辅助脚本时，也可以直接执行：
@@ -142,9 +167,9 @@ adb shell am broadcast -n io.github.linloir.reflection/.control.ControlReceiver 
 
 ### 多屏映射
 
-连接新版宿主后，平板顶部显示当前映射目标。点击 **Screens** 打开布局图，屏幕的位置、
+连接新版宿主后，点击工具栏的 **屏幕** 打开布局图，屏幕的位置、
 大小和主屏标记来自电脑的显示器排列；点击布局中的屏幕或列表中的名称即可选择。
-**All screens** 恢复整个桌面映射，**Previous** / **Next** 在单块屏幕间切换。
+**全部屏幕** 恢复整个桌面映射；边界手势可以按显示器实际方位切换单屏。
 切换请求与笔事件按同一队列发送，落笔期间由宿主延迟到抬笔后应用，避免一笔跨屏跳跃。
 这里切换的是宿主目标，平板采集区域和本地防抖设置不变。
 
@@ -169,7 +194,7 @@ adb shell am broadcast -n io.github.linloir.reflection/.control.ControlReceiver 
 | `standard` | 仅使用标准 `AXIS_TILT` / `AXIS_ORIENTATION`，可用于对照兼容恢复前的输入 |
 | `off` | 保留坐标、压力和按钮，倾斜输出为零 |
 
-点击界面顶部的 **Tilt** 可选择模式并查看当前采样、可用轴和恢复诊断；设置界面不改变
+在 **设置 → 笔与手势 → 倾斜角方案** 中选择模式；CLI 状态可查看当前采样、可用轴和恢复诊断。设置界面不改变
 书写区的位置。CLI 调用相同控制器：
 
 ```sh
@@ -177,7 +202,7 @@ adb shell am broadcast -n io.github.linloir.reflection/.control.ControlReceiver 
 ./scripts/reflection-android tilt status
 ```
 
-**Retry detection** 或 `./scripts/reflection-android tilt reset` 仅重新开始输入格式
+`./scripts/reflection-android tilt reset` 仅重新开始输入格式
 识别；模式、累计计数和防抖校准保持不变。计数应比较操作前后的差值。
 
 `lastRawTilt`、`lastRawOrientation` 保留 Android 交给应用的弧度值，尚未经过兼容处理。
@@ -199,7 +224,7 @@ Auto 使用限定设备的兼容解码恢复这条一维通道，并结合系统
 
 Auto 需要足够的输入格式证据和明确的方向判断，识别过程中可能暂时显示等待；
 不能仅凭设备名称或一个异常值启用恢复。已识别结果在笔离开、重新进入后保留，
-需要重新检查时使用 Retry detection。
+需要重新检查时使用 `tilt reset`。
 
 诊断应同时查看原始值、`tiltStatus`、`tiltReliable`、异常/降级计数和最终
 `lastSample.tiltX/tiltY`，区分标准有效输入、一维恢复、恢复等待、不可用和关闭。
@@ -223,9 +248,11 @@ Android 的标准输入层分别将 Linux `BTN_TOOL_RUBBER` 解释为 eraser，�
 
 ## 电子墨水屏
 
-默认关闭本地预览，以避免普通 Android 重绘给电子墨水屏带来的额外刷新。关闭预览不会关闭笔采集，宿主机仍然收到全部样本。打开预览后使用通用 Android Canvas，不承诺 BOOX 原生笔记应用的笔尖跟随速度，也没有强行切换设备刷新模式。
+默认关闭本地预览。关闭预览不会关闭笔采集，宿主机仍然收到全部样本。开启后使用 Android Canvas；电子纸优先使用可用的厂商局部刷新接口，不改变系统全局模式。可选笔迹末尾渐隐，不承诺等同 BOOX 原生笔记应用的笔尖跟随速度。
 
-Onyx 的低延迟本地墨迹 SDK 是后续独立渲染适配层的候选。当前实现不依赖厂商 SDK，因此其他 Android 平板仍能使用标准笔输入路径。完整评估要区分本地墨迹显示延迟、Android 事件采集延迟、网络延迟、宿主机注入延迟和目标应用显示延迟。
+`eink/` 提供可替换刷新驱动，BOOX 桥接基于官方 SDK 可核实的固件接口反射，
+不分发厂商 SDK。其他平板或接口受限的固件使用标准局部重绘。适配证据和实机
+验收边界见 [电子纸适配](../../docs/eink.md)。
 
 ## 模块与稳定性策略
 
@@ -233,7 +260,8 @@ Onyx 的低延迟本地墨迹 SDK 是后续独立渲染适配层的候选。当�
 - `input/`：将 `MotionEvent` 和历史样本转换为标准笔样本，验证设备数值范围。
 - `transport/`：TCP / RFCOMM 字节流、会话认证、心跳、有界队列和重连。
 - `control/`：持久配置和公共控制接口，UI 与 CLI 都经此入口。
-- `ui/`：可替换的演示界面与普通 Canvas 本地预览。
+- `ui/`：首次引导、分页设置、操作区域和 Canvas 本地预览。
+- `eink/`：设备识别、局部刷新调度与厂商适配。
 
 采集不执行网络 I/O。256 个样本/控制消息的队列满时断开并清空，避免持续累积延迟或静默丢失关键落笔/抬笔边沿；宿主机必须在断开时释放笔状态。重连后不会续传缺少落笔的旧笔画。每 500ms 发送心跳；握手与读写均有截止时间，蓝牙阻塞 I/O 也会由 watchdog 关闭。离开采集界面或书写区域大小改变会发送取消，避免持续按下。
 

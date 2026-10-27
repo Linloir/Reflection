@@ -11,6 +11,8 @@ compiler=${CXX:-c++}
     "$module_dir/src/core.cpp" \
     "$module_dir/src/config.cpp" \
     "$module_dir/src/protocol.cpp" \
+    "$module_dir/src/raw_touchpad.cpp" \
+    "$module_dir/src/discovery_protocol.cpp" \
     "$module_dir/src/display_mapping.cpp" \
     "$module_dir/src/stabilization.cpp" \
     "$module_dir/tests/core_tests.cpp" \
@@ -19,7 +21,7 @@ compiler=${CXX:-c++}
 "$compiler" -std=c++17 -Wall -Wextra -Wpedantic -Werror \
     -I"$module_dir/include" \
     "$module_dir/src/core.cpp" "$module_dir/src/config.cpp" \
-    "$module_dir/src/protocol.cpp" "$module_dir/src/display_mapping.cpp" \
+    "$module_dir/src/protocol.cpp" "$module_dir/src/raw_touchpad.cpp" "$module_dir/src/discovery_protocol.cpp" "$module_dir/src/display_mapping.cpp" \
     "$module_dir/src/stabilization.cpp" "$module_dir/tests/stabilization_tests.cpp" \
     -o "$build_dir/reflection-stabilization-tests"
 "$build_dir/reflection-stabilization-tests"

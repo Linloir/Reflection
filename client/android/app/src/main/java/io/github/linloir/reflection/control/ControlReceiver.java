@@ -13,6 +13,10 @@ public final class ControlReceiver extends BroadcastReceiver {
             String command = intent.getStringExtra("command");
             if (command == null) command = "status";
             switch (command) {
+                case "provision-usb": c.provisionUsb(intent.getStringExtra("token"), intent.getBooleanExtra("select", false)); break;
+                case "automatic-connect": c.startAutomaticConnection(); break;
+                case "pairing-identity":
+                    setResultCode(0); setResultData(new JSONObject().put("id", c.pairingIdentityID()).toString()); return;
                 case "configure":
                     c.configure(intent.hasExtra("host") ? intent.getStringExtra("host") : c.host(),
                         intent.getIntExtra("port", c.port()), intent.hasExtra("token") ? intent.getStringExtra("token") : c.token(),

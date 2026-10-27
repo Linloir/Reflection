@@ -71,6 +71,7 @@ std::map<std::string, std::string> config_values(const Config& c, bool secrets) 
         {"mapping.target", !c.target_display.empty() ? "display:" + c.target_display :
             c.target_virtual_desktop ? "desktop" : rect_text(c.mapping.target)},
         {"mapping.show_cursor", c.show_cursor ? "true" : "false"},
+        {"touchpad.native", c.native_touchpad ? "true" : "false"},
         {"mapping.rotation", std::to_string(c.mapping.rotation)},
         {"mapping.pressure_gamma", text(c.mapping.pressure_gamma)},
         {"mapping.pressure_curve", curve_text(c.mapping)},
@@ -127,6 +128,9 @@ void set_config(Config& c, const std::string& key, const std::string& value) {
     } else if (key == "mapping.show_cursor") {
         if (value != "true" && value != "false") throw std::invalid_argument("show_cursor requires true or false");
         c.show_cursor = value == "true";
+    } else if (key == "touchpad.native") {
+        if (value != "true" && value != "false") throw std::invalid_argument("touchpad.native requires true or false");
+        c.native_touchpad = value == "true";
     } else if (key == "mapping.rotation") {
         const auto n = number(value);
         if (n != 0 && n != 90 && n != 180 && n != 270) throw std::invalid_argument("invalid rotation");

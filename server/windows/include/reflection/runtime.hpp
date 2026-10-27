@@ -1,6 +1,7 @@
 #pragma once
 #include "reflection/config.hpp"
 #include "reflection/display_mapping.hpp"
+#include "reflection/discovery.hpp"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -22,7 +23,7 @@ private:
 class HostRuntime {
 public:
     HostRuntime(const std::filesystem::path& path, const Config& config, bool dry_run,
-                std::atomic_bool& running);
+                std::atomic_bool& running, bool automatic_discovery = false);
     ~HostRuntime();
     HostRuntime(const HostRuntime&) = delete;
     HostRuntime& operator=(const HostRuntime&) = delete;
@@ -31,6 +32,8 @@ public:
     static bool stop(const std::filesystem::path& path);
     std::shared_ptr<DisplayMapping> display_mapping() const;
     std::shared_ptr<HostInput> input() const;
+    std::shared_ptr<AutomaticConnectivity> connectivity() const;
+    static std::string pairing_request(const std::filesystem::path& path, const std::string& id = "");
     static std::string calibration_request(const std::filesystem::path& path, unsigned action);
     static std::string mapping_request(const std::filesystem::path& path, unsigned action,
                                        const std::string& display = "");
